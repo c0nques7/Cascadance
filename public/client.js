@@ -3,7 +3,39 @@ let tracks = [];
 let currentTrackIndex = -1;
 let isPlaying = false;
 let uBassValue = 0;
+let uMidValue = 0;
+let uHighValue = 0;
 let dataArray;
+
+function analyzeAudioProfile(frequencyData) {
+    if (!frequencyData) return { low: 0, mid: 0, high: 0 };
+
+    let lowSum = 0, midSum = 0, highSum = 0;
+    const lowCount = 11; // 0-10
+    const midCount = 90; // 11-100
+    const highCount = 155; // 101-255
+
+    // Low (Bass): Indices 0-10
+    for (let i = 0; i < 11; i++) {
+        lowSum += frequencyData[i];
+    }
+    
+    // Mid (Vocals/Lead): Indices 11-100
+    for (let i = 11; i < 101; i++) {
+        midSum += frequencyData[i];
+    }
+    
+    // High (Treble): Indices 101-255
+    for (let i = 101; i < 256; i++) {
+        highSum += frequencyData[i];
+    }
+
+    return {
+        low: lowSum / (lowCount * 255),
+        mid: midSum / (midCount * 255),
+        high: highSum / (highCount * 255)
+    };
+}
 
 // DOM Elements
 const audioInput = document.getElementById('audio-input');
@@ -353,6 +385,8 @@ const SHADER_LIB = {
         uniform float iTime;
         uniform vec2 iResolution;
         uniform float uBass;
+        uniform float uMid;
+        uniform float uHigh;
         uniform float uSpeed;
         uniform float uWarp;
         uniform float uGlow;
@@ -368,19 +402,30 @@ const SHADER_LIB = {
 
         float map(vec3 p) {
             p.z = mod(p.z, 20.0) - 10.0;
-            p.xy *= rot(p.z * uWarp * sin(iTime * 0.5));
+            // Twist based on Mid frequencies
+            p.xy *= rot(p.z * (uWarp + uMid * 0.2) * sin(iTime * 0.5));
+            
             vec3 b = vec3(2.5, 2.5, 12.0);
+            // Pulse tunnel radius based on Bass
+            b.xy += uBass * 0.5; 
+            
             vec3 q = abs(p) - b;
             float box = length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+            
+            // Ripple effect
             float ripple = sin(p.x * 2.0 + iTime * 2.0) * cos(p.y * 2.0 + iTime * 2.0) * 0.2 * uBass;
             return -box + ripple;
         }
 
         void main() {
             vec2 uv = (gl_FragCoord.xy - 0.5 * iResolution.xy) / min(iResolution.y, iResolution.x);
+            
+            // FOV kick based on Bass
             vec3 ro = vec3(uCamX, uCamY, iTime * uSpeed);
-            vec3 rd = normalize(vec3(uv, uZoom));
+            vec3 rd = normalize(vec3(uv, uZoom - uBass * 0.2)); 
+            
             rd.xy *= rot(iTime * 0.1);
+            
             float t = 0.0;
             int i;
             for(i = 0; i < 80; i++) {
@@ -388,12 +433,18 @@ const SHADER_LIB = {
                 if(h < 0.001 || t > 40.0) break;
                 t += h;
             }
+            
             vec3 col = vec3(0.0);
             if(t < 40.0) {
                 float glow = 1.0 - float(i) / 80.0;
-                vec3 baseCol = mix(vec3(0.5, 0.0, 0.8), vec3(0.0, 0.8, 0.9), sin(iTime + t * 0.1) * 0.5 + 0.5);
-                col = baseCol * glow * (uGlow + uBass * 3.0);
+                
+                // Color shift based on Mid
+                vec3 baseCol = mix(vec3(0.5, 0.0, 0.8), vec3(0.0, 0.8, 0.9), sin(iTime + t * 0.1 + uMid * 2.0) * 0.5 + 0.5);
+                
+                // Brightness/Bloom based on High
+                col = baseCol * glow * (uGlow + uBass * 3.0 + uHigh * 4.0);
             }
+            
             col *= exp(-0.05 * t);
             gl_FragColor = vec4(col, 1.0);
         }
@@ -418,7 +469,9 @@ container.appendChild(renderer.domElement);
 const uniforms = {
     iTime: { value: 0 },
     iResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-    uBass: { value: 0 }
+    uBass: { value: 0 },
+    uMid: { value: 0 },
+    uHigh: { value: 0 }
 };
 
 // Initialize Camera Uniforms
@@ -534,15 +587,36 @@ function animate(time) {
     requestAnimationFrame(animate);
     if (isPlaying && analyser) {
         analyser.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for(let i = 0; i < 10; i++) sum += dataArray[i];
-        let targetBass = sum / (10 * 255);
-        uBassValue = uBassValue * 0.8 + targetBass * 0.2;
+        
+        let lowSum = 0, midSum = 0, highSum = 0;
+        // Low (Bass): Indices 0-10
+        for(let i = 0; i < 11; i++) lowSum += dataArray[i];
+        // Mid: Indices 11-100
+        for(let i = 11; i < 101; i++) midSum += dataArray[i];
+        // High: Indices 101-255
+        for(let i = 101; i < 256; i++) highSum += dataArray[i];
+
+        const targetBass = lowSum / (11 * 255);
+        const targetMid = midSum / (90 * 255);
+        const targetHigh = highSum / (155 * 255);
+
+        // Smoothing (Lerp 0.15)
+        uBassValue = uBassValue * 0.85 + targetBass * 0.15;
+        uMidValue = uMidValue * 0.85 + targetMid * 0.15;
+        uHighValue = uHighValue * 0.85 + targetHigh * 0.15;
     } else {
         uBassValue *= 0.95;
+        uMidValue *= 0.95;
+        uHighValue *= 0.95;
+        
         if (uBassValue < 0.001) uBassValue = 0;
+        if (uMidValue < 0.001) uMidValue = 0;
+        if (uHighValue < 0.001) uHighValue = 0;
     }
+    
     uniforms.uBass.value = uBassValue;
+    uniforms.uMid.value = uMidValue;
+    uniforms.uHigh.value = uHighValue;
     uniforms.iTime.value = time * 0.001;
     renderer.render(scene, camera);
 }
