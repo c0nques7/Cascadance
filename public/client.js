@@ -26,11 +26,16 @@ const dockBtn = document.getElementById('dock-btn');
 let isDocked = false;
 const originalPositions = new Map();
 
-function toggleMinimize(id) {
-    const el = document.getElementById(id);
-    el.classList.toggle('minimized');
-}
-window.toggleMinimize = toggleMinimize;
+// Initialize Minimize Buttons
+document.querySelectorAll('.minimize-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation(); // Prevent island click from firing immediately
+        const island = btn.closest('.island');
+        if (island) {
+            island.classList.toggle('minimized');
+        }
+    });
+});
 
 window.toggleDock = function() {
     isDocked = !isDocked;
