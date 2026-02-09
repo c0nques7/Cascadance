@@ -21,45 +21,60 @@ const durationSpan = document.getElementById('duration');
 
 // --- 1. UI Logic (Draggable & Minimizable Islands) ---
 
-function makeDraggable(el) {
-    const header = el.querySelector('.island-header');
-    let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
-    
-    header.onmousedown = dragMouseDown;
-
-    function dragMouseDown(e) {
-        if (el.classList.contains('minimized')) return;
-        if (e.target.classList.contains('minimize-btn')) return;
-        e.preventDefault();
-        pos3 = e.clientX;
-        pos4 = e.clientY;
-        document.onmouseup = closeDragElement;
-        document.onmousemove = elementDrag;
-    }
-
-    function elementDrag(e) {
-        e.preventDefault();
-        pos1 = pos3 - e.clientX;
-        pos2 = pos4 - e.clientY;
-        pos3 = e.clientX;
-        pos4 = e.clientY;
-        el.style.top = (el.offsetTop - pos2) + "px";
-        el.style.left = (el.offsetLeft - pos1) + "px";
-        el.style.right = 'auto';
-    }
-
-    function closeDragElement() {
-        document.onmouseup = null;
-        document.onmousemove = null;
-    }
-}
-
 function toggleMinimize(id) {
     const el = document.getElementById(id);
     el.classList.toggle('minimized');
 }
 
 window.toggleMinimize = toggleMinimize;
+
+let isDocked = false;
+const uiContainer = document.getElementById('ui-container');
+const dockBtn = document.getElementById('dock-btn');
+dockBtn.addEventListener('click', window.toggleDock);
+const originalPositions = new Map();
+
+window.toggleDock = function() {
+    isDocked = !isDocked;
+    
+    if (isDocked) {
+        uiContainer.classList.add('docked');
+        dockBtn.textContent = 'Undock UI';
+        
+        // Save current positions before docking
+        document.querySelectorAll('.island').forEach(island => {
+            originalPositions.set(island.id, {
+                top: island.style.top,
+                left: island.style.left,
+                right: island.style.right // though we mostly use top/left
+            });
+            // Clear inline styles to let flexbox take over
+            island.style.top = '';
+            island.style.left = '';
+            island.style.right = '';
+        });
+    } else {
+        uiContainer.classList.remove('docked');
+        dockBtn.textContent = 'Dock UI';
+        
+        // Restore positions
+        document.querySelectorAll('.island').forEach(island => {
+            const pos = originalPositions.get(island.id);
+            if (pos) {
+                island.style.top = pos.top;
+                island.style.left = pos.left;
+                // If right was set (like visual island initially), restore it?
+                // Actually, makeDraggable sets top/left. Initial CSS uses right.
+                // If the user hasn't dragged, top/left might be empty strings.
+                // In that case, we should clear them to let CSS take over again.
+                if (!pos.top && !pos.left) {
+                    island.style.top = '';
+                    island.style.left = '';
+                }
+            }
+        });
+    }
+};
 
 document.querySelectorAll('.island').forEach(island => {
     makeDraggable(island);
@@ -70,7 +85,24 @@ document.querySelectorAll('.island').forEach(island => {
     });
 });
 
-// --- 2. Audio Player & Logic ---
+// Update makeDraggable to respect docked state
+function makeDraggable(el) {
+    const header = el.querySelector('.island-header');
+    let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+    
+    header.onmousedown = dragMouseDown;
+
+    function dragMouseDown(e) {
+        if (isDocked) return; // Disable dragging when docked
+        if (el.classList.contains('minimized')) return;
+        if (e.target.classList.contains('minimize-btn')) return;
+        e.preventDefault();
+        pos3 = e.clientX;
+        pos4 = e.clientY;
+        document.onmouseup = closeDragElement;
+        document.onmousemove = elementDrag;
+    }
+
 
 function ensureAudioContext() {
     if (!audioContext) {
