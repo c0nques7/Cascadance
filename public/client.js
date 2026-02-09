@@ -87,7 +87,7 @@ audioInput.addEventListener('change', async (e) => {
     if (!file) return;
 
     const formData = new FormData();
-    formData.append('mp3file', file);
+    formData.append('audioFile', file);
 
     try {
         const response = await fetch('/upload', { method: 'POST', body: formData });

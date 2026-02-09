@@ -22,7 +22,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-app.post('/upload', upload.single('mp3file'), (req, res) => {
+app.post('/upload', upload.single('audioFile'), (req, res) => {
     if (!req.file) {
         return res.status(400).send('No file uploaded.');
     }
