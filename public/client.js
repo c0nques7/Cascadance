@@ -7,6 +7,14 @@ let uMidValue = 0;
 let uHighValue = 0;
 let dataArray;
 
+const audioMetrics = {
+    lowSens: 1.0,
+    midSens: 1.0,
+    highSens: 1.0,
+    autoGain: false,
+    gainFactor: 1.0
+};
+
 function analyzeAudioProfile(frequencyData) {
     if (!frequencyData) return { low: 0, mid: 0, high: 0 };
 
@@ -298,7 +306,53 @@ prevBtn.addEventListener('click', (e) => { e.stopPropagation(); playPrev(); });
 progressBar.addEventListener('input', (e) => { e.stopPropagation(); if (audio) audio.currentTime = progressBar.value; });
 visualStyleSelect.addEventListener('click', (e) => e.stopPropagation());
 
-// --- 3. Visualizer (Three.js & GLSL) ---
+// --- 3. Audio Reactivity UI ---
+
+const freqCanvas = document.getElementById('frequency-monitor');
+const freqCtx = freqCanvas.getContext('2d');
+const lowSensInput = document.getElementById('low-sens');
+const midSensInput = document.getElementById('mid-sens');
+const highSensInput = document.getElementById('high-sens');
+const autoGainCheck = document.getElementById('auto-gain');
+
+function updateSens(key, inputId, displayId) {
+    const val = parseFloat(document.getElementById(inputId).value);
+    audioMetrics[key] = val;
+    document.getElementById(displayId).textContent = val.toFixed(1);
+}
+
+lowSensInput.addEventListener('input', () => updateSens('lowSens', 'low-sens', 'low-sens-val'));
+midSensInput.addEventListener('input', () => updateSens('midSens', 'mid-sens', 'mid-sens-val'));
+highSensInput.addEventListener('input', () => updateSens('highSens', 'high-sens', 'high-sens-val'));
+
+autoGainCheck.addEventListener('change', (e) => {
+    audioMetrics.autoGain = e.target.checked;
+    if (!audioMetrics.autoGain) audioMetrics.gainFactor = 1.0;
+});
+
+function drawFrequencyMonitor(low, mid, high) {
+    const w = freqCanvas.width;
+    const h = freqCanvas.height;
+    freqCtx.clearRect(0, 0, w, h);
+
+    // Bars
+    const barW = (w - 10) / 3;
+    
+    // Low
+    freqCtx.fillStyle = '#ef4444'; // Red-ish
+    const hLow = low * h;
+    freqCtx.fillRect(0, h - hLow, barW, hLow);
+
+    // Mid
+    freqCtx.fillStyle = '#22c55e'; // Green-ish
+    const hMid = mid * h;
+    freqCtx.fillRect(barW + 5, h - hMid, barW, hMid);
+
+    // High
+    freqCtx.fillStyle = '#3b82f6'; // Blue-ish
+    const hHigh = high * h;
+    freqCtx.fillRect((barW + 5) * 2, h - hHigh, barW, hHigh);
+}
 
 const CAMERA_CONFIG = [
     { name: 'uCamX', label: 'Pan X', min: -2.0, max: 2.0, val: 0.0 },
@@ -600,10 +654,29 @@ function animate(time) {
         const targetMid = midSum / (90 * 255);
         const targetHigh = highSum / (155 * 255);
 
+        // Auto Gain logic
+        if (audioMetrics.autoGain) {
+            const avg = (targetBass + targetMid + targetHigh) / 3;
+            // Simple exponential moving average for gain control
+            const targetGain = avg > 0.1 ? 0.3 / avg : 1.0; 
+            audioMetrics.gainFactor = audioMetrics.gainFactor * 0.95 + targetGain * 0.05;
+            // Clamp gain to avoid explosion
+            if (audioMetrics.gainFactor > 5.0) audioMetrics.gainFactor = 5.0;
+            if (audioMetrics.gainFactor < 0.5) audioMetrics.gainFactor = 0.5;
+        }
+
+        // Apply Gain & Sensitivity
+        const finalBass = targetBass * audioMetrics.lowSens * audioMetrics.gainFactor;
+        const finalMid = targetMid * audioMetrics.midSens * audioMetrics.gainFactor;
+        const finalHigh = targetHigh * audioMetrics.highSens * audioMetrics.gainFactor;
+        
+        // Draw Monitor
+        drawFrequencyMonitor(finalBass, finalMid, finalHigh);
+
         // Smoothing (Lerp 0.15)
-        uBassValue = uBassValue * 0.85 + targetBass * 0.15;
-        uMidValue = uMidValue * 0.85 + targetMid * 0.15;
-        uHighValue = uHighValue * 0.85 + targetHigh * 0.15;
+        uBassValue = uBassValue * 0.85 + finalBass * 0.15;
+        uMidValue = uMidValue * 0.85 + finalMid * 0.15;
+        uHighValue = uHighValue * 0.85 + finalHigh * 0.15;
     } else {
         uBassValue *= 0.95;
         uMidValue *= 0.95;
@@ -612,6 +685,8 @@ function animate(time) {
         if (uBassValue < 0.001) uBassValue = 0;
         if (uMidValue < 0.001) uMidValue = 0;
         if (uHighValue < 0.001) uHighValue = 0;
+        
+        drawFrequencyMonitor(0, 0, 0);
     }
     
     uniforms.uBass.value = uBassValue;

@@ -258,6 +258,41 @@
                 <option value="tunnel">Neon Warp Tunnel</option>
             </select>
             <div id="parameter-container"></div>
+            
+            <div class="audio-reactivity-section" style="margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 15px;">
+                <h4 style="margin: 0 0 10px 0; font-size: 12px; color: #38bdf8; text-transform: uppercase; letter-spacing: 1px;">Audio Reactivity</h4>
+                
+                <canvas id="frequency-monitor" width="290" height="60" style="width: 100%; height: 60px; background: rgba(0,0,0,0.3); border-radius: 4px; margin-bottom: 10px;"></canvas>
+
+                <div class="param-row">
+                    <div class="param-info">
+                        <label>Low Sensitivity</label>
+                        <span id="low-sens-val" class="param-value">1.0</span>
+                    </div>
+                    <input type="range" id="low-sens" min="0" max="3" step="0.1" value="1.0">
+                </div>
+                
+                <div class="param-row">
+                    <div class="param-info">
+                        <label>Mid Sensitivity</label>
+                        <span id="mid-sens-val" class="param-value">1.0</span>
+                    </div>
+                    <input type="range" id="mid-sens" min="0" max="3" step="0.1" value="1.0">
+                </div>
+
+                <div class="param-row">
+                    <div class="param-info">
+                        <label>High Sensitivity</label>
+                        <span id="high-sens-val" class="param-value">1.0</span>
+                    </div>
+                    <input type="range" id="high-sens" min="0" max="3" step="0.1" value="1.0">
+                </div>
+
+                <div class="param-row" style="flex-direction: row; align-items: center; justify-content: space-between; margin-top: 5px;">
+                    <label style="margin: 0;">Auto-Gain Control</label>
+                    <input type="checkbox" id="auto-gain" style="width: auto; margin: 0;">
+                </div>
+            </div>
         </div>
     </div>
 
