@@ -33,6 +33,12 @@ document.querySelectorAll('.minimize-btn').forEach(btn => {
         const island = btn.closest('.island');
         if (island) {
             island.classList.toggle('minimized');
+            // Toggle button text
+            if (island.classList.contains('minimized')) {
+                btn.textContent = '[+]';
+            } else {
+                btn.textContent = '[-]';
+            }
         }
     });
 });
