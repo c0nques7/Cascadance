@@ -61,12 +61,15 @@ window.toggleDock = function() {
             if (pos) {
                 island.style.top = pos.top;
                 island.style.left = pos.left;
+                island.style.right = pos.right;
                 
                 // If the user hasn't dragged, top/left might be empty strings.
                 // In that case, we should clear them to let CSS take over again.
-                if (!pos.top && !pos.left) {
+                // We also check right here to be safe.
+                if (!pos.top && !pos.left && !pos.right) {
                     island.style.top = '';
                     island.style.left = '';
+                    island.style.right = '';
                 }
             }
         });
