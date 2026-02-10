@@ -1,0 +1,95 @@
+/* --- Top Dock (HUD Style) --- */
+.dock-top-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%; /* Allow it to span down, but acts as a pass-through layer */
+    pointer-events: none; /* CRITICAL: Allows clicking on the 3D canvas behind the empty space */
+    
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap; /* Allow windows to wrap if screen is narrow */
+    align-items: flex-start; /* CRITICAL FIX: Prevents minimized windows from stretching vertically */
+    align-content: flex-start;
+    
+    padding: 10px;
+    gap: 10px;
+    z-index: 100;
+}
+
+/* Ensure the islands themselves are clickable */
+.dock-top-container > .island {
+    pointer-events: auto;
+    flex-grow: 0; /* Do not expand to fill width */
+    position: relative !important;
+    transform: none !important;
+    top: auto !important;
+    left: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    margin: 0;
+    height: auto;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.75);
+    min-width: 250px;
+}
+
+/* --- Bottom Dock (Timeline Only) --- */
+.dock-bottom-container {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: auto;
+    pointer-events: none; /* Pass-through */
+    
+    display: flex;
+    flex-direction: column; 
+    justify-content: flex-end; /* Pushes content to the very bottom */
+    z-index: 100;
+}
+
+.dock-bottom-container > .island {
+    pointer-events: auto;
+    position: relative !important;
+    transform: none !important;
+    top: auto !important;
+    left: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    margin: 0;
+}
+
+/* --- Timeline Specific Overrides --- */
+/* When docked, the timeline should look like a bottom panel/taskbar */
+#timeline-island.docked {
+    width: 100% !important;
+    height: 200px !important; /* Fixed height for HUD timeline */
+    min-width: 100%;
+    border-radius: 0 !important;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    background: rgba(0, 0, 0, 0.85);
+    box-shadow: 0 -4px 10px rgba(0,0,0,0.3); /* Shadow pointing up */
+}
+
+/* Hide Resize Handle when docked */
+.island.docked .resize-handle {
+    display: none !important;
+}
+
+/* Ensure content area adjusts */
+#timeline-island.docked .content-area {
+    height: calc(100% - 35px); /* Minus header height */
+}
+
+/* Fix for Timeline Minimize Logic */
+#timeline-island.docked.minimized {
+    position: relative !important; /* Reset any absolute positioning */
+    width: 100% !important;
+    margin-bottom: 0 !important;
+    flex-grow: 0 !important;
+    height: auto !important; /* Override fixed height */
+}

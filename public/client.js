@@ -1,4 +1,7 @@
+import { MultiTrackTimeline } from './VisualTimeline.js';
+
 let audioContext, analyser, source, audio;
+let visualTimeline;
 let tracks = [];
 let currentTrackIndex = -1;
 let isPlaying = false;
@@ -61,6 +64,13 @@ const durationSpan = document.getElementById('duration');
 const uiContainer = document.getElementById('ui-container');
 const dockBtn = document.getElementById('dock-btn');
 
+visualTimeline = new MultiTrackTimeline('timeline-container', (time) => {
+    if (audio) {
+        audio.currentTime = time;
+    }
+});
+window.visualTimeline = visualTimeline;
+
 // --- 1. UI Logic (Draggable & Minimizable Islands) ---
 
 let isDocked = false;
@@ -73,10 +83,19 @@ document.querySelectorAll('.minimize-btn').forEach(btn => {
         const island = btn.closest('.island');
         if (island) {
             island.classList.toggle('minimized');
-            // Toggle button text
+            
             if (island.classList.contains('minimized')) {
+                // Store height and clear inline style to allow CSS auto-height
+                if (island.style.height) {
+                    island.dataset.prevHeight = island.style.height;
+                }
+                island.style.height = '';
                 btn.textContent = '[+]';
             } else {
+                // Restore height
+                if (island.dataset.prevHeight) {
+                    island.style.height = island.dataset.prevHeight;
+                }
                 btn.textContent = '[-]';
             }
         }
@@ -85,45 +104,88 @@ document.querySelectorAll('.minimize-btn').forEach(btn => {
 
 window.toggleDock = function() {
     isDocked = !isDocked;
+    const uiContainer = document.getElementById('ui-container');
     
     if (isDocked) {
-        uiContainer.classList.add('docked');
         dockBtn.textContent = 'Undock UI';
         
-        // Save current positions before docking
+        // Create Containers
+        let dockTop = document.getElementById('dock-top');
+        if (!dockTop) {
+            dockTop = document.createElement('div');
+            dockTop.id = 'dock-top';
+            dockTop.className = 'dock-top-container';
+            uiContainer.appendChild(dockTop);
+        }
+        
+        let dockBottom = document.getElementById('dock-bottom');
+        if (!dockBottom) {
+            dockBottom = document.createElement('div');
+            dockBottom.id = 'dock-bottom';
+            dockBottom.className = 'dock-bottom-container';
+            uiContainer.appendChild(dockBottom);
+        }
+        
+        // Move Islands
         document.querySelectorAll('.island').forEach(island => {
+            // Save Position & Dimensions
             originalPositions.set(island.id, {
                 top: island.style.top,
                 left: island.style.left,
-                right: island.style.right 
+                right: island.style.right,
+                width: island.style.width,
+                height: island.style.height
             });
-            // Clear inline styles to let flexbox take over
+            
+            // Clear positioning styles
             island.style.top = '';
             island.style.left = '';
             island.style.right = '';
+            island.style.bottom = '';
+            // Only clear dimensions for non-timeline items to allow flex
+            if (island.id !== 'timeline-island') {
+                 island.style.width = '';
+                 island.style.height = '';
+            }
+            island.classList.add('docked');
+            
+            if (island.id === 'timeline-island') {
+                dockBottom.appendChild(island);
+                // Force resize for timeline canvas
+                if (window.visualTimeline) {
+                    setTimeout(() => window.visualTimeline.resize(), 100);
+                }
+            } else {
+                dockTop.appendChild(island);
+            }
         });
+        
     } else {
-        uiContainer.classList.remove('docked');
         dockBtn.textContent = 'Dock UI';
         
-        // Restore positions
+        const dockTop = document.getElementById('dock-top');
+        const dockBottom = document.getElementById('dock-bottom');
+        
+        // Restore Islands
         document.querySelectorAll('.island').forEach(island => {
+            uiContainer.appendChild(island); // Move back
+            island.classList.remove('docked');
+            
             const pos = originalPositions.get(island.id);
             if (pos) {
                 island.style.top = pos.top;
                 island.style.left = pos.left;
-                island.style.right = pos.right;
-                
-                // If the user hasn't dragged, top/left might be empty strings.
-                // In that case, we should clear them to let CSS take over again.
-                // We also check right here to be safe.
-                if (!pos.top && !pos.left && !pos.right) {
-                    island.style.top = '';
-                    island.style.left = '';
-                    island.style.right = '';
-                }
+                island.style.width = pos.width;
+                island.style.height = pos.height;
             }
         });
+        
+        // Remove Containers
+        if (dockTop) dockTop.remove();
+        if (dockBottom) dockBottom.remove();
+        
+        // Trigger resize
+        if (window.visualTimeline) setTimeout(() => window.visualTimeline.resize(), 50);
     }
 };
 
@@ -237,8 +299,32 @@ function loadTrack(index) {
     }
 
     currentTrackIndex = index;
-    audio = new Audio(tracks[currentTrackIndex].path);
+    const trackPath = tracks[currentTrackIndex].path;
+    audio = new Audio(trackPath);
+    window.audio = audio;
     
+    // Load full buffer for visualization
+    console.log('Client: Fetching track...', trackPath);
+    fetch(trackPath)
+        .then(response => {
+            console.log('Client: Track fetched. Status:', response.status);
+            return response.arrayBuffer();
+        })
+        .then(arrayBuffer => {
+            console.log('Client: Decoding audio data...');
+            return audioContext.decodeAudioData(arrayBuffer);
+        })
+        .then(audioBuffer => {
+            console.log('Client: Audio decoded. Duration:', audioBuffer.duration);
+            if (visualTimeline) {
+                console.log('Client: Calling visualTimeline.analyzeAudio');
+                visualTimeline.analyzeAudio(audioBuffer);
+            } else {
+                console.error('Client: visualTimeline is not initialized!');
+            }
+        })
+        .catch(err => console.error('Client: Error loading waveform:', err));
+
     if (source) source.disconnect();
     source = audioContext.createMediaElementSource(audio);
     source.connect(analyser);
@@ -251,7 +337,9 @@ function loadTrack(index) {
     });
 
     renderPlaylist();
-    playAudio();
+    // Auto-play removed. User must click Play.
+    playPauseBtn.textContent = 'Play';
+    isPlaying = false;
 }
 
 function playAudio() {
@@ -291,6 +379,7 @@ function updateProgress() {
     if (!audio) return;
     progressBar.value = audio.currentTime;
     currentTimeSpan.textContent = formatTime(audio.currentTime);
+    if (visualTimeline) visualTimeline.updatePlayhead(audio.currentTime, audio.duration);
 }
 
 function formatTime(seconds) {
@@ -355,36 +444,129 @@ function drawFrequencyMonitor(low, mid, high) {
 }
 
 const CAMERA_CONFIG = [
-    { name: 'uCamX', label: 'Pan X', min: -2.0, max: 2.0, val: 0.0 },
-    { name: 'uCamY', label: 'Pan Y', min: -2.0, max: 2.0, val: 0.0 },
-    { name: 'uZoom', label: 'Zoom/FOV', min: 0.1, max: 3.0, val: 1.5 }
+    // --- SECTION 1: MANUAL POSITIONING ---
+    { 
+        name: 'uCamX', label: 'Pan X', min: -2.0, max: 2.0, value: 0.0, 
+        automation: { enabled: false, source: 'uBass', strength: 0.0 } 
+    },
+    { 
+        name: 'uCamY', label: 'Pan Y', min: -2.0, max: 2.0, value: 0.0, 
+        automation: { enabled: false, source: 'uBass', strength: 0.0 } 
+    },
+    { 
+        name: 'uZoom', label: 'Base Zoom', min: 0.1, max: 5.0, value: 1.5, 
+        automation: { enabled: false, source: 'uBass', strength: 0.0 } 
+    },
+
+    // --- SECTION 2: AUDIO REACTIVITY (Intensity Multipliers) ---
+    { 
+        name: 'uPitch', label: 'Bass Wobble (Pitch)', min: 0.0, max: 1.0, value: 0.2, 
+        isIntensity: true, // Custom flag for animate loop
+        automation: { enabled: true, source: 'uBass', strength: 1.0 } 
+    },
+    { 
+        name: 'uYaw', label: 'High Spin (Yaw)', min: 0.0, max: 1.0, value: 0.1, 
+        isIntensity: true,
+        automation: { enabled: true, source: 'uHigh', strength: 1.0 } 
+    },
+    { 
+        name: 'uRoll', label: 'Mid Twist (Roll)', min: 0.0, max: 1.0, value: 0.3, 
+        isIntensity: true,
+        automation: { enabled: true, source: 'uMid', strength: 1.0 } 
+    }
 ];
 
 const SHADER_PARAMS = {
     menger: [
-        { name: 'uSpeed', label: 'Rotation Speed', min: 0.0, max: 2.0, value: 0.2 },
-        { name: 'uColor', label: 'Color Shift', min: 0.0, max: 1.0, value: 0.5 },
-        { name: 'uSensitivity', label: 'Bass Reaction', min: 0.0, max: 2.0, value: 0.5 }
+        { 
+            name: 'uSpeed', label: 'Rotation Speed', min: 0.0, max: 2.0, value: 0.2,
+            automation: { enabled: false, source: 'uBass', strength: 0.1 } 
+        },
+        { 
+            name: 'uColor', label: 'Color Shift', min: 0.0, max: 1.0, value: 0.5,
+            automation: { enabled: true, source: 'uMid', strength: 0.3 } 
+        },
+        { 
+            name: 'uSensitivity', label: 'Bass Reaction', min: 0.0, max: 2.0, value: 0.5,
+            automation: { enabled: false, source: 'uBass', strength: 0.5 }
+        }
     ],
     tunnel: [
-        { name: 'uSpeed', label: 'Flight Speed', min: 1.0, max: 20.0, value: 10.0 },
-        { name: 'uWarp', label: 'Tunnel Warp', min: 0.0, max: 0.5, value: 0.1 },
-        { name: 'uGlow', label: 'Glow Intensity', min: 0.5, max: 5.0, value: 1.5 }
+        { 
+            name: 'uSpeed', label: 'Flight Speed', min: 1.0, max: 20.0, value: 10.0,
+            automation: { enabled: true, source: 'uBass', strength: 5.0 }
+        },
+        { 
+            name: 'uWarp', label: 'Tunnel Warp', min: 0.0, max: 0.5, value: 0.1,
+            automation: { enabled: true, source: 'uMid', strength: 0.2 } 
+        },
+        { 
+            name: 'uGlow', label: 'Glow Intensity', min: 0.5, max: 5.0, value: 1.5,
+            automation: { enabled: true, source: 'uHigh', strength: 1.0 } 
+        }
     ]
 };
+
+// --- Reset Logic: Capture Defaults ---
+function captureDefaults(config) {
+    if (Array.isArray(config)) {
+        config.forEach(param => {
+            if (param.defaultValue === undefined) {
+                param.defaultValue = param.value !== undefined ? param.value : param.val;
+            }
+            if (param.automation && !param.defaultAutomation) {
+                param.defaultAutomation = JSON.parse(JSON.stringify(param.automation));
+            }
+        });
+    } else {
+        // Handle object of arrays (SHADER_PARAMS)
+        Object.values(config).forEach(array => captureDefaults(array));
+    }
+}
+
+captureDefaults(CAMERA_CONFIG);
+captureDefaults(SHADER_PARAMS);
 
 const SHADER_LIB = {
     menger: `
         uniform float iTime;
         uniform vec2 iResolution;
         uniform float uBass;
+        uniform float uMid;
+        uniform float uHigh;
         uniform float uSpeed;
         uniform float uColor;
         uniform float uSensitivity;
         uniform float uCamX;
         uniform float uCamY;
         uniform float uZoom;
+        
+        // Camera Rotation (6DoF)
+        uniform float uPitch;
+        uniform float uYaw;
+        uniform float uRoll;
+        
+        // Color Engine
+        uniform float uBaseHue;
+        uniform float uSaturation;
+        uniform float uColorShift;
+        
         varying vec2 vUv;
+
+        // --- Helpers ---
+        vec3 hsl2rgb(vec3 c) {
+            vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+            return c.z + c.y * (rgb - 0.5) * (1.0 - abs(2.0 * c.z - 1.0));
+        }
+
+        mat3 getCamRot(vec3 rpy) {
+            vec3 s = sin(rpy);
+            vec3 c = cos(rpy);
+            mat3 rotX = mat3(1.0, 0.0, 0.0, 0.0, c.x, -s.x, 0.0, s.x, c.x);
+            mat3 rotY = mat3(c.y, 0.0, s.y, 0.0, 1.0, 0.0, -s.y, 0.0, c.y);
+            mat3 rotZ = mat3(c.z, -s.z, 0.0, s.z, c.z, 0.0, 0.0, 0.0, 1.0);
+            return rotZ * rotY * rotX;
+        }
 
         float sdBox(vec3 p, vec3 b) {
             vec3 q = abs(p) - b;
@@ -410,28 +592,51 @@ const SHADER_LIB = {
 
         void main() {
             vec2 uv = (gl_FragCoord.xy - 0.5 * iResolution.xy) / min(iResolution.y, iResolution.x);
-            vec3 ro = vec3(uCamX, uCamY, 3.5);
+            
+            // --- Camera Setup ---
+            vec3 ro = vec3(uCamX, uCamY, 3.5); 
             vec3 rd = normalize(vec3(uv, -uZoom));
-            float rotX = iTime * uSpeed;
-            float rotY = iTime * uSpeed * 1.5;
+            
+            // Apply 6DoF Rotation
+            mat3 camRot = getCamRot(vec3(uPitch, uYaw, uRoll));
+            rd = camRot * rd;
+            ro = camRot * ro; // Orbital rotation
+            
+            // Auto-rotation from Time (Legacy parameter support)
+            float rotX = iTime * uSpeed * 0.1;
+            float rotY = iTime * uSpeed * 0.15;
             mat3 mX = mat3(1, 0, 0, 0, cos(rotX), -sin(rotX), 0, sin(rotX), cos(rotX));
             mat3 mY = mat3(cos(rotY), 0, sin(rotY), 0, 1, 0, -sin(rotY), 0, cos(rotY));
-            ro *= mX * mY;
             rd *= mX * mY;
+            ro *= mX * mY;
+
+            // --- Raymarching ---
             float t = 0.0;
             int i;
             for(i = 0; i < 64; i++) {
                 float h = map(ro + rd * t);
-                if(h < 0.001 || t > 10.0) break;
+                if(h < 0.001 || t > 20.0) break;
                 t += h;
             }
+            
             vec3 col = vec3(0.0);
-            if(t < 10.0) {
+            if(t < 20.0) {
                 float glow = 1.0 - float(i) / 64.0;
-                vec3 baseCol = vec3(0.1, 0.5, 0.9);
-                baseCol.rb += uColor * 0.5;
-                col = baseCol * glow * (1.0 + uBass * 2.0);
+                
+                // --- Color Engine ---
+                float hue = (uBaseHue / 360.0) + (uMid * uColorShift);
+                hue = fract(hue); // Wrap 0.0-1.0
+                float sat = uSaturation; // 0.0-1.0 from JS
+                
+                vec3 hslColor = hsl2rgb(vec3(hue, sat, 0.5));
+                
+                // Mix with lighting
+                col = hslColor * glow * (1.0 + uBass * 2.0);
             }
+            
+            // Fog / Depth
+            col = mix(col, vec3(0.0), 1.0 - exp(-0.1 * t));
+            
             gl_FragColor = vec4(col, 1.0);
         }
     `,
@@ -447,7 +652,33 @@ const SHADER_LIB = {
         uniform float uCamX;
         uniform float uCamY;
         uniform float uZoom;
+        
+        // Camera Rotation
+        uniform float uPitch;
+        uniform float uYaw;
+        uniform float uRoll;
+        
+        // Color Engine
+        uniform float uBaseHue;
+        uniform float uSaturation;
+        uniform float uColorShift;
+        
         varying vec2 vUv;
+
+        // --- Helpers ---
+        vec3 hsl2rgb(vec3 c) {
+            vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+            return c.z + c.y * (rgb - 0.5) * (1.0 - abs(2.0 * c.z - 1.0));
+        }
+
+        mat3 getCamRot(vec3 rpy) {
+            vec3 s = sin(rpy);
+            vec3 c = cos(rpy);
+            mat3 rotX = mat3(1.0, 0.0, 0.0, 0.0, c.x, -s.x, 0.0, s.x, c.x);
+            mat3 rotY = mat3(c.y, 0.0, s.y, 0.0, 1.0, 0.0, -s.y, 0.0, c.y);
+            mat3 rotZ = mat3(c.z, -s.z, 0.0, s.z, c.z, 0.0, 0.0, 0.0, 1.0);
+            return rotZ * rotY * rotX;
+        }
 
         mat2 rot(float a) {
             float s = sin(a), c = cos(a);
@@ -478,6 +709,11 @@ const SHADER_LIB = {
             vec3 ro = vec3(uCamX, uCamY, iTime * uSpeed);
             vec3 rd = normalize(vec3(uv, uZoom - uBass * 0.2)); 
             
+            // Apply 6DoF Rotation
+            mat3 camRot = getCamRot(vec3(uPitch, uYaw, uRoll));
+            rd = camRot * rd;
+            
+            // Extra tunnel twist
             rd.xy *= rot(iTime * 0.1);
             
             float t = 0.0;
@@ -492,8 +728,12 @@ const SHADER_LIB = {
             if(t < 40.0) {
                 float glow = 1.0 - float(i) / 80.0;
                 
-                // Color shift based on Mid
-                vec3 baseCol = mix(vec3(0.5, 0.0, 0.8), vec3(0.0, 0.8, 0.9), sin(iTime + t * 0.1 + uMid * 2.0) * 0.5 + 0.5);
+                // --- Color Engine ---
+                float hue = (uBaseHue / 360.0) + (uMid * uColorShift);
+                hue = fract(hue);
+                
+                // Mix dynamic hue with a bit of the old palette for flavor
+                vec3 baseCol = hsl2rgb(vec3(hue, uSaturation, 0.5));
                 
                 // Brightness/Bloom based on High
                 col = baseCol * glow * (uGlow + uBass * 3.0 + uHigh * 4.0);
@@ -525,12 +765,53 @@ const uniforms = {
     iResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
     uBass: { value: 0 },
     uMid: { value: 0 },
-    uHigh: { value: 0 }
+    uHigh: { value: 0 },
+    // Color Palette Uniforms
+    uBaseHue: { value: 0.0 },
+    uSaturation: { value: 1.0 },
+    uColorShift: { value: 0.5 },
+    // Camera Orientation
+    uPitch: { value: 0.0 },
+    uYaw: { value: 0.0 },
+    uRoll: { value: 0.0 }
 };
+window.uniforms = uniforms; // Expose for Timeline
+
+// --- Color Palette Logic ---
+const baseHueInput = document.getElementById('base-hue');
+const saturationInput = document.getElementById('saturation');
+const colorShiftInput = document.getElementById('color-shift');
+
+function updateColorParams() {
+    const hue = parseFloat(baseHueInput.value);
+    const sat = parseFloat(saturationInput.value);
+    const shift = parseFloat(colorShiftInput.value);
+
+    // Update Displays
+    document.getElementById('base-hue-val').textContent = hue;
+    document.getElementById('saturation-val').textContent = sat + '%';
+    document.getElementById('color-shift-val').textContent = shift.toFixed(2);
+
+    // Update Uniforms
+    uniforms.uBaseHue.value = hue;
+    uniforms.uSaturation.value = sat / 100.0;
+    uniforms.uColorShift.value = shift;
+
+    // Update Timeline Visualization
+    if (visualTimeline) {
+        visualTimeline.setColorParams(hue, sat, shift);
+    }
+}
+
+baseHueInput.addEventListener('input', updateColorParams);
+saturationInput.addEventListener('input', updateColorParams);
+colorShiftInput.addEventListener('input', updateColorParams);
 
 // Initialize Camera Uniforms
 CAMERA_CONFIG.forEach(param => {
-    uniforms[param.name] = { value: param.val };
+    // Ensure we use .value (new config) or fallback to .val (old config)
+    const v = param.value !== undefined ? param.value : param.val;
+    uniforms[param.name] = { value: v };
 });
 
 const geometry = new THREE.PlaneGeometry(2, 2);
@@ -538,50 +819,194 @@ let material;
 let mesh;
 
 function createSliderElement(param, container, onInput) {
+    // 1. Create Row
     const row = document.createElement('div');
-    row.className = 'param-row';
-    
-    const info = document.createElement('div');
-    info.className = 'param-info';
-    
+    row.className = 'control-row';
+    row.style.marginBottom = '12px';
+    row.style.position = 'relative';
+
+    // 2. Header (Label + Manual Toggle)
+    const header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.justifyContent = 'space-between';
+    header.style.marginBottom = '4px';
+
     const label = document.createElement('label');
     label.textContent = param.label;
+    label.style.fontSize = '12px';
+    label.style.color = '#ccc';
+    header.appendChild(label);
+
+    // Add Toggle ONLY if automation config exists
+    if (param.automation) {
+        const toggleLabel = document.createElement('label');
+        toggleLabel.style.fontSize = '10px';
+        toggleLabel.style.cursor = 'pointer';
+        toggleLabel.style.display = 'flex';
+        toggleLabel.style.alignItems = 'center';
+        toggleLabel.style.gap = '4px';
+        toggleLabel.style.color = '#888';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !param.automation.enabled; // Checked = Manual
+        checkbox.onchange = (e) => {
+            param.automation.enabled = !e.target.checked;
+            // Toggle visibility of the "Ghost Bar"
+            const meter = row.querySelector('.live-meter');
+            if (meter) meter.style.display = param.automation.enabled ? 'block' : 'none';
+        };
+
+        toggleLabel.appendChild(checkbox);
+        toggleLabel.appendChild(document.createTextNode('Manual'));
+        header.appendChild(toggleLabel);
+    }
+    row.appendChild(header);
+
+    // 3. Slider Track Container
+    const sliderContainer = document.createElement('div');
+    sliderContainer.style.position = 'relative';
+    sliderContainer.style.height = '6px';
+    sliderContainer.style.background = 'rgba(255,255,255,0.1)';
+    sliderContainer.style.borderRadius = '3px';
+    sliderContainer.style.marginTop = '5px';
+
+    // 4. Live Meter (The "Ghost Bar")
+    const liveMeter = document.createElement('div');
+    liveMeter.className = 'live-meter'; // Class for easy selection
+    liveMeter.style.position = 'absolute';
+    liveMeter.style.top = '0';
+    liveMeter.style.left = '0';
+    liveMeter.style.height = '100%';
+    liveMeter.style.width = '0%'; // Will be updated by animate()
+    liveMeter.style.background = 'rgba(56, 189, 248, 0.5)'; // Brighter Blue
+    liveMeter.style.borderRadius = '3px';
+    liveMeter.style.pointerEvents = 'none'; // Click-through
+    liveMeter.style.transition = 'width 0.05s linear';
+    liveMeter.style.display = (param.automation && param.automation.enabled) ? 'block' : 'none';
     
-    const valueDisplay = document.createElement('span');
-    valueDisplay.className = 'param-value';
-    valueDisplay.textContent = (param.value !== undefined ? param.value : param.val).toFixed(2);
+    // CRITICAL: Attach to param for animate loop access
+    param.uiMeter = liveMeter;
     
-    info.appendChild(label);
-    info.appendChild(valueDisplay);
-    
-    const slider = document.createElement('input');
-    slider.type = 'range';
-    slider.min = param.min;
-    slider.max = param.max;
-    slider.step = (param.max - param.min) / 100;
-    slider.value = param.value !== undefined ? param.value : param.val;
-    
-    slider.addEventListener('input', (e) => {
+    sliderContainer.appendChild(liveMeter);
+
+    // 5. The Input Slider
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = param.min;
+    input.max = param.max;
+    input.step = (param.max - param.min) / 100;
+    input.value = param.value !== undefined ? param.value : param.val;
+    input.style.width = '100%';
+    input.style.height = '15px'; // Taller hit area
+    input.style.marginTop = '-4px'; // Center over track
+    input.style.cursor = 'pointer';
+    input.style.position = 'absolute';
+    input.style.top = '0';
+    input.style.margin = '0';
+    input.style.opacity = '0'; // Invisible track, custom thumb? 
+    // Actually, making it invisible hides the thumb too in some browsers.
+    // Let's use opacity 1 but transparent background so we see the meter.
+    input.style.opacity = '1';
+    input.style.background = 'transparent';
+    input.style.appearance = 'none'; 
+    input.style.webkitAppearance = 'none';
+
+    // Tooltip
+    input.setAttribute('data-tooltip', `Adjust ${param.label}`);
+
+    input.addEventListener('input', (e) => {
         const val = parseFloat(e.target.value);
         if (param.value !== undefined) param.value = val;
         else param.val = val;
-        valueDisplay.textContent = val.toFixed(2);
         onInput(val);
     });
 
-    row.appendChild(info);
-    row.appendChild(slider);
+    // Custom Thumb Styles (Injected via style tag or inline is hard for pseudo-elements)
+    // For now, rely on default thumb but transparent track.
+
+    sliderContainer.appendChild(input);
+    row.appendChild(sliderContainer);
     container.appendChild(row);
 }
 
-function initCameraControls() {
-    cameraControlsContainer.innerHTML = '';
-    CAMERA_CONFIG.forEach(param => {
-        createSliderElement(param, cameraControlsContainer, (val) => {
+// --- Reset Logic: Execution ---
+function resetGroup(config, container) {
+    if (!container) return;
+    
+    config.forEach(param => {
+        // 1. Reset Data
+        if (param.defaultValue !== undefined) param.value = param.defaultValue;
+        if (param.defaultAutomation) {
+            param.automation = JSON.parse(JSON.stringify(param.defaultAutomation));
+        }
+        
+        // 2. Update Uniforms
+        if (uniforms[param.name]) {
+            uniforms[param.name].value = param.value;
+        }
+        
+        // 3. Update DOM
+        // We need to find the specific row. createSliderElement doesn't add IDs.
+        // But we can iterate inputs and find matches? Or re-render the whole container?
+        // Re-rendering is safer and easier.
+    });
+    
+    // Refresh UI
+    container.innerHTML = '';
+    config.forEach(param => {
+        createSliderElement(param, container, (val) => {
             if (material && material.uniforms[param.name]) {
                 material.uniforms[param.name].value = val;
             }
-            uniforms[param.name].value = val; // Persistent storage
+            if (uniforms[param.name]) uniforms[param.name].value = val;
+        });
+    });
+}
+
+function initCameraControls() {
+    const container = document.getElementById('camera-controls');
+    if (!container) return; 
+
+    // Inject Reset Button into Header if not present
+    const header = document.querySelector('#camera-island .island-header');
+    if (header && !header.querySelector('.reset-btn')) {
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'reset-btn';
+        resetBtn.textContent = '↺';
+        resetBtn.setAttribute('data-tooltip', 'Reset to Defaults');
+        resetBtn.style.background = 'none';
+        resetBtn.style.border = 'none';
+        resetBtn.style.color = '#888';
+        resetBtn.style.cursor = 'pointer';
+        resetBtn.style.marginRight = '5px';
+        resetBtn.style.fontSize = '14px';
+        
+        resetBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            resetGroup(CAMERA_CONFIG, container);
+        });
+        
+        // Insert before minimize button
+        const minBtn = header.querySelector('.minimize-btn');
+        header.insertBefore(resetBtn, minBtn);
+    }
+
+    container.innerHTML = '';
+
+    CAMERA_CONFIG.forEach(param => {
+        if (!uniforms[param.name]) {
+            // console.log(`Auto-initializing uniform: ${param.name}`);
+            uniforms[param.name] = { value: param.value };
+        }
+
+        createSliderElement(param, container, (val) => {
+            if (material && material.uniforms[param.name]) {
+                material.uniforms[param.name].value = val;
+            }
+            if (uniforms[param.name]) {
+                uniforms[param.name].value = val;
+            }
         });
     });
 }
@@ -590,6 +1015,31 @@ function renderParams(styleKey) {
     parameterContainer.innerHTML = '';
     const params = SHADER_PARAMS[styleKey];
     if (!params) return;
+
+    // Inject Reset Button for Visuals
+    const header = document.querySelector('#visual-island .island-header');
+    if (header && !header.querySelector('.reset-btn')) {
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'reset-btn';
+        resetBtn.textContent = '↺';
+        resetBtn.setAttribute('data-tooltip', 'Reset to Defaults');
+        resetBtn.style.background = 'none';
+        resetBtn.style.border = 'none';
+        resetBtn.style.color = '#888';
+        resetBtn.style.cursor = 'pointer';
+        resetBtn.style.marginRight = '5px';
+        resetBtn.style.fontSize = '14px';
+        
+        // Dynamic Listener: Always resets CURRENT style params
+        resetBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const currentStyle = visualStyleSelect.value;
+            resetGroup(SHADER_PARAMS[currentStyle], parameterContainer);
+        });
+        
+        const minBtn = header.querySelector('.minimize-btn');
+        header.insertBefore(resetBtn, minBtn);
+    }
 
     params.forEach(param => {
         createSliderElement(param, parameterContainer, (val) => {
@@ -600,7 +1050,9 @@ function renderParams(styleKey) {
             else uniforms[param.name].value = val;
         });
         
-        if (!uniforms[param.name]) uniforms[param.name] = { value: param.value };
+        // Ensure initial value is set in uniforms
+        const initialVal = param.value !== undefined ? param.value : param.val;
+        if (!uniforms[param.name]) uniforms[param.name] = { value: initialVal };
     });
 }
 
@@ -639,6 +1091,8 @@ window.addEventListener('resize', () => {
 
 function animate(time) {
     requestAnimationFrame(animate);
+    
+    // --- Audio Analysis ---
     if (isPlaying && analyser) {
         analyser.getByteFrequencyData(dataArray);
         
@@ -657,10 +1111,8 @@ function animate(time) {
         // Auto Gain logic
         if (audioMetrics.autoGain) {
             const avg = (targetBass + targetMid + targetHigh) / 3;
-            // Simple exponential moving average for gain control
             const targetGain = avg > 0.1 ? 0.3 / avg : 1.0; 
             audioMetrics.gainFactor = audioMetrics.gainFactor * 0.95 + targetGain * 0.05;
-            // Clamp gain to avoid explosion
             if (audioMetrics.gainFactor > 5.0) audioMetrics.gainFactor = 5.0;
             if (audioMetrics.gainFactor < 0.5) audioMetrics.gainFactor = 0.5;
         }
@@ -673,7 +1125,7 @@ function animate(time) {
         // Draw Monitor
         drawFrequencyMonitor(finalBass, finalMid, finalHigh);
 
-        // Smoothing (Lerp 0.15)
+        // Smoothing
         uBassValue = uBassValue * 0.85 + finalBass * 0.15;
         uMidValue = uMidValue * 0.85 + finalMid * 0.15;
         uHighValue = uHighValue * 0.85 + finalHigh * 0.15;
@@ -681,18 +1133,93 @@ function animate(time) {
         uBassValue *= 0.95;
         uMidValue *= 0.95;
         uHighValue *= 0.95;
-        
-        if (uBassValue < 0.001) uBassValue = 0;
-        if (uMidValue < 0.001) uMidValue = 0;
-        if (uHighValue < 0.001) uHighValue = 0;
-        
         drawFrequencyMonitor(0, 0, 0);
     }
     
+    // --- Uniform Updates ---
     uniforms.uBass.value = uBassValue;
     uniforms.uMid.value = uMidValue;
     uniforms.uHigh.value = uHighValue;
     uniforms.iTime.value = time * 0.001;
+
+    // --- Parameter Automation & Live Metering ---
+    const currentStyle = visualStyleSelect.value;
+    const activeParams = SHADER_PARAMS[currentStyle];
+    
+    if (activeParams) {
+        activeParams.forEach(param => {
+            let finalVal = param.value;
+            
+            if (param.automation && param.automation.enabled) {
+                // Determine audio source value
+                let sourceVal = 0;
+                if (param.automation.source === 'uBass') sourceVal = uBassValue;
+                else if (param.automation.source === 'uMid') sourceVal = uMidValue;
+                else if (param.automation.source === 'uHigh') sourceVal = uHighValue;
+                
+                // Calculate automated value
+                // Value = Base + (Source * Strength)
+                finalVal = param.value + (sourceVal * param.automation.strength);
+                
+                // Update UI Meter
+                if (param.uiMeter) {
+                    // Map value to 0-100% range
+                    const percent = Math.max(0, Math.min(100, ((finalVal - param.min) / (param.max - param.min)) * 100));
+                    param.uiMeter.style.width = `${percent}%`;
+                }
+            } else if (param.uiMeter) {
+                // Hide meter in manual mode
+                param.uiMeter.style.width = '0%';
+            }
+
+            // Update Shader Uniform
+            if (material && material.uniforms[param.name]) {
+                material.uniforms[param.name].value = finalVal;
+            }
+        });
+    }
+
+    // --- Camera Automation & Metering ---
+    CAMERA_CONFIG.forEach(param => {
+        let finalVal = param.value;
+        
+        if (param.automation && param.automation.enabled) {
+            let sourceVal = 0;
+            if (param.automation.source === 'uBass') sourceVal = uBassValue;
+            else if (param.automation.source === 'uMid') sourceVal = uMidValue;
+            else if (param.automation.source === 'uHigh') sourceVal = uHighValue;
+            
+            if (param.isIntensity) {
+                // Slider sets the MAX AMPLITUDE of the reaction
+                finalVal = sourceVal * param.value;
+            } else {
+                // Standard: Slider sets BASE value, Audio adds offset
+                finalVal = param.value + (sourceVal * param.automation.strength);
+            }
+            
+            if (param.uiMeter) {
+                let percent = 0;
+                if (param.isIntensity) {
+                    // Normalize 0 to Max
+                    percent = (Math.abs(finalVal) / param.max) * 100;
+                } else {
+                    // Standard Range Mapping
+                    percent = ((finalVal - param.min) / (param.max - param.min)) * 100;
+                }
+                percent = Math.max(0, Math.min(100, percent));
+                param.uiMeter.style.width = `${percent}%`;
+            }
+        } else if (param.uiMeter) {
+            param.uiMeter.style.width = '0%';
+        }
+        
+        // Update Uniform
+        if (material && material.uniforms[param.name]) {
+            material.uniforms[param.name].value = finalVal;
+        }
+        uniforms[param.name].value = finalVal;
+    });
+
     renderer.render(scene, camera);
 }
 

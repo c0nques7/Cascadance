@@ -1,0 +1,17 @@
+.island.minimized {
+    height: auto !important; /* Override inline styles */
+    min-height: 0 !important;
+    resize: none !important; /* Disable resizing while minimized */
+    padding-bottom: 0 !important;
+}
+
+.island.minimized .content-area,
+.island.minimized .resize-handle {
+    display: none !important; /* Hide everything except header */
+}
+
+.island.minimized .island-header {
+    border-bottom: none; /* remove separator line */
+    margin-bottom: 0;
+    border-radius: 12px; /* Restore rounded bottom when content is hidden */
+}
