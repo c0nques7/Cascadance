@@ -19,6 +19,15 @@ export class MultiTrackTimeline {
         this.zoomLevel = 1.0;
         this.scrollOffset = 0.0;
         
+        // Selection State
+        this.selectionStart = null;
+        this.selectionEnd = null;
+        this.isSelecting = false;
+        this.dragStartTime = 0;
+        
+        this.hoveredSegment = null;
+        this.resizingState = null; // { segment, edge: 'start'|'end' }
+        
         // Color State
         this.colorParams = { hue: 0, sat: 100, shift: 0.5 };
 
@@ -223,15 +232,145 @@ export class MultiTrackTimeline {
         }
     }
 
+    showContextMenu(x, y, startTime, endTime, existingSegment) {
+        const existing = document.getElementById('timeline-ctx-menu');
+        if (existing) existing.remove();
+
+        const menu = document.createElement('div');
+        menu.id = 'timeline-ctx-menu';
+        menu.style.position = 'fixed';
+        menu.style.left = `${x}px`;
+        menu.style.top = `${y}px`;
+        menu.style.background = 'rgba(0, 0, 0, 0.9)';
+        menu.style.backdropFilter = 'blur(10px)';
+        menu.style.border = '1px solid rgba(255, 255, 255, 0.2)';
+        menu.style.padding = '12px';
+        menu.style.zIndex = '10000';
+        menu.style.borderRadius = '8px';
+        menu.style.display = 'flex';
+        menu.style.flexDirection = 'column';
+        menu.style.gap = '8px';
+        menu.style.minWidth = '150px';
+        menu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
+
+        // Header
+        const header = document.createElement('div');
+        header.textContent = existingSegment ? 'Edit Segment' : `Range: ${startTime.toFixed(1)}s - ${endTime.toFixed(1)}s`;
+        header.style.fontSize = '11px';
+        header.style.color = '#aaa';
+        header.style.marginBottom = '4px';
+        menu.appendChild(header);
+
+        // Tag Select
+        const select = document.createElement('select');
+        select.style.background = 'rgba(255, 255, 255, 0.1)';
+        select.style.color = '#fff';
+        select.style.border = '1px solid rgba(255, 255, 255, 0.2)';
+        select.style.padding = '4px';
+        select.style.borderRadius = '4px';
+        
+        const tags = Object.keys(window.TAG_LIBRARY || {});
+        tags.forEach(tag => {
+            const opt = document.createElement('option');
+            opt.value = tag;
+            opt.textContent = tag;
+            if (existingSegment && existingSegment.tag === tag) opt.selected = true;
+            select.appendChild(opt);
+        });
+        menu.appendChild(select);
+
+        // Add/Update Button
+        const addBtn = document.createElement('button');
+        addBtn.textContent = existingSegment ? 'Update Tag' : 'Apply Tag';
+        addBtn.style.background = '#38bdf8';
+        addBtn.style.color = '#000';
+        addBtn.style.border = 'none';
+        addBtn.style.padding = '6px';
+        addBtn.style.borderRadius = '4px';
+        addBtn.style.cursor = 'pointer';
+        addBtn.style.fontWeight = 'bold';
+        
+        addBtn.onclick = () => {
+            if (existingSegment) {
+                existingSegment.tag = select.value;
+            } else if (window.activeSegments) {
+                window.activeSegments.push({
+                    start: startTime,
+                    end: endTime,
+                    tag: select.value
+                });
+            }
+            menu.remove();
+            this.selectionStart = null;
+            this.selectionEnd = null;
+            this.drawTracks();
+        };
+        menu.appendChild(addBtn);
+
+        // Delete Button (Only for existing)
+        if (existingSegment) {
+            const delBtn = document.createElement('button');
+            delBtn.textContent = 'Delete Segment';
+            delBtn.style.background = 'rgba(239, 68, 68, 0.2)';
+            delBtn.style.color = '#ef4444';
+            delBtn.style.border = '1px solid rgba(239, 68, 68, 0.5)';
+            delBtn.style.padding = '6px';
+            delBtn.style.borderRadius = '4px';
+            delBtn.style.cursor = 'pointer';
+            
+            delBtn.onclick = () => {
+                const idx = window.activeSegments.indexOf(existingSegment);
+                if (idx > -1) {
+                    window.activeSegments.splice(idx, 1);
+                }
+                menu.remove();
+                this.drawTracks();
+            };
+            menu.appendChild(delBtn);
+        }
+
+        // Cancel
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = 'Cancel';
+        clearBtn.style.background = 'transparent';
+        clearBtn.style.color = '#aaa';
+        clearBtn.style.border = '1px solid rgba(255,255,255,0.2)';
+        clearBtn.style.padding = '4px';
+        clearBtn.style.borderRadius = '4px';
+        clearBtn.style.cursor = 'pointer';
+        
+        clearBtn.onclick = () => {
+             this.selectionStart = null;
+             this.selectionEnd = null;
+             this.drawTracks();
+             menu.remove();
+        };
+        menu.appendChild(clearBtn);
+
+        const closeHandler = (e) => {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                window.removeEventListener('mousedown', closeHandler);
+            }
+        };
+        setTimeout(() => window.addEventListener('mousedown', closeHandler), 10);
+        document.body.appendChild(menu);
+    }
+
     initListeners() {
-        let isDragging = false;
-        const handleSeek = (e) => {
-            if (!this.audioDuration) return;
+        let isSeekDragging = false;
+        
+        const getTimeFromEvent = (e) => {
+            if (!this.audioDuration) return 0;
             const rect = this.canvasContainer.getBoundingClientRect();
             const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
             const visiblePct = x / rect.width;
             const globalPct = this.scrollOffset + (visiblePct * (1.0 / this.zoomLevel));
-            const time = Math.min(this.audioDuration, Math.max(0, globalPct * this.audioDuration));
+            return Math.min(this.audioDuration, Math.max(0, globalPct * this.audioDuration));
+        };
+
+        const handleSeek = (e) => {
+            const time = getTimeFromEvent(e);
             if (this.onSeek) this.onSeek(time);
         };
 
@@ -265,27 +404,112 @@ export class MultiTrackTimeline {
         };
 
         this.canvasContainer.addEventListener('mousedown', (e) => {
-            isDragging = true;
-            handleSeek(e);
+            const rect = this.canvasContainer.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            // Hit Test
+            const hit = this.getHitTest(x, y);
+
+            // 1. Resize (Left Click on Edge)
+            if (hit && hit.type === 'resize' && e.button === 0) {
+                this.resizingState = hit;
+                return;
+            }
+
+            // 2. Right Click (2) or Shift+Click
+            if (e.button === 2 || e.shiftKey) {
+                // Check if we hit an existing segment (Body or Resize)
+                if (hit && (hit.type === 'body' || hit.type === 'resize')) {
+                    // Edit Existing
+                    e.preventDefault();
+                    this.showContextMenu(e.clientX, e.clientY, hit.segment.start, hit.segment.end, hit.segment);
+                } else {
+                    // New Selection
+                    this.isSelecting = true;
+                    this.selectionStart = getTimeFromEvent(e);
+                    this.selectionEnd = this.selectionStart;
+                    this.dragStartTime = Date.now();
+                    e.preventDefault();
+                }
+            } else {
+                // 3. Normal Seek (Left Click)
+                isSeekDragging = true;
+                handleSeek(e);
+            }
+        });
+
+        // Prevent default context menu
+        this.canvasContainer.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
         });
 
         window.addEventListener('mousemove', (e) => {
-            if (isDragging) {
+            if (this.resizingState) {
+                e.preventDefault();
+                const time = getTimeFromEvent(e);
+                this.resizingState.segment[this.resizingState.edge] = time;
+                this.drawTracks();
+            } else if (this.isSelecting) {
+                e.preventDefault();
+                this.selectionEnd = getTimeFromEvent(e);
+                this.drawTracks();
+            } else if (isSeekDragging) {
                 e.preventDefault();
                 handleSeek(e);
             }
         });
 
         this.canvasContainer.addEventListener('mousemove', (e) => {
-            if (!isDragging) updateTooltip(e);
+            if (!isSeekDragging && !this.isSelecting && !this.resizingState) {
+                // Hit Test for Cursor
+                const rect = this.canvasContainer.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                const hit = this.getHitTest(x, y);
+                
+                if (hit && hit.type === 'resize') {
+                    this.canvasContainer.style.cursor = 'col-resize';
+                    this.tooltip.style.display = 'none'; // Hide tooltip during resize hover
+                } else if (hit && hit.type === 'body') {
+                    this.canvasContainer.style.cursor = 'context-menu';
+                    updateTooltip(e); // Keep tooltip for context
+                } else {
+                    this.canvasContainer.style.cursor = 'crosshair';
+                    updateTooltip(e);
+                }
+            }
         });
 
         this.canvasContainer.addEventListener('mouseleave', () => {
             this.tooltip.style.display = 'none';
         });
 
-        window.addEventListener('mouseup', () => {
-            isDragging = false;
+        window.addEventListener('mouseup', (e) => {
+            if (this.resizingState) {
+                // Ensure Start < End
+                const seg = this.resizingState.segment;
+                if (seg.start > seg.end) {
+                    const temp = seg.start;
+                    seg.start = seg.end;
+                    seg.end = temp;
+                }
+                this.resizingState = null;
+                this.drawTracks();
+            } else if (this.isSelecting) {
+                this.isSelecting = false;
+                const duration = Math.abs(this.selectionEnd - this.selectionStart);
+                if (duration > 0.1) {
+                    const start = Math.min(this.selectionStart, this.selectionEnd);
+                    const end = Math.max(this.selectionStart, this.selectionEnd);
+                    this.showContextMenu(e.clientX, e.clientY, start, end);
+                } else {
+                    this.selectionStart = null;
+                    this.selectionEnd = null;
+                    this.drawTracks();
+                }
+            }
+            isSeekDragging = false;
         });
 
         window.addEventListener('resize', () => {
@@ -364,6 +588,87 @@ export class MultiTrackTimeline {
         if (window.audio) this.updatePlayhead(window.audio.currentTime, window.audio.duration);
     }
 
+    getXFromTime(time) {
+        if (!this.audioDuration) return -1;
+        const rect = this.canvasContainer.getBoundingClientRect();
+        const globalPct = time / this.audioDuration;
+        const visiblePct = (globalPct - this.scrollOffset) * this.zoomLevel;
+        return visiblePct * rect.width;
+    }
+
+    getHitTest(x, y) {
+        if (!window.activeSegments) return null;
+        
+        // 1. Check Edges (Resize) - Threshold 8px
+        const threshold = 8;
+        
+        for (const seg of window.activeSegments) {
+            const startX = this.getXFromTime(seg.start);
+            const endX = this.getXFromTime(seg.end);
+            
+            if (Math.abs(x - startX) < threshold) return { type: 'resize', segment: seg, edge: 'start' };
+            if (Math.abs(x - endX) < threshold) return { type: 'resize', segment: seg, edge: 'end' };
+        }
+
+        // 2. Check Body (Move/Edit) - Inside rect
+        for (const seg of window.activeSegments) {
+            const startX = this.getXFromTime(seg.start);
+            const endX = this.getXFromTime(seg.end);
+            if (x >= startX && x <= endX) return { type: 'body', segment: seg };
+        }
+        
+        return null;
+    }
+
+    drawSegments() {
+        if (!window.activeSegments || window.activeSegments.length === 0 || !this.ctx) return;
+        
+        const dpr = window.devicePixelRatio || 1;
+        const w = this.canvas.width / dpr;
+        const h = this.canvas.height / dpr;
+
+        window.activeSegments.forEach(seg => {
+            const startX = (seg.start / this.audioDuration - this.scrollOffset) * this.zoomLevel * w;
+            const endX = (seg.end / this.audioDuration - this.scrollOffset) * this.zoomLevel * w;
+            const width = Math.max(1, endX - startX);
+
+            // Skip if out of view
+            if (endX < 0 || startX > w) return;
+
+            // Determine Color based on Tag
+            let color = 'rgba(255, 165, 0, 0.3)'; // Default Orange (Build Up)
+            if (seg.tag === 'Drop') color = 'rgba(255, 0, 0, 0.3)'; // Red
+            if (seg.tag === 'Calm') color = 'rgba(0, 191, 255, 0.3)'; // Blue
+
+            this.ctx.fillStyle = color;
+            this.ctx.fillRect(startX, 0, width, h);
+            
+            // Draw Label
+            this.ctx.fillStyle = '#fff';
+            this.ctx.font = '10px monospace';
+            this.ctx.fillText(seg.tag || 'Custom', Math.max(0, startX) + 5, 12);
+        });
+    }
+
+    drawSelectionOverlay() {
+        if (this.selectionStart === null || this.selectionEnd === null || !this.ctx) return;
+        
+        const dpr = window.devicePixelRatio || 1;
+        const w = this.canvas.width / dpr;
+        const h = this.canvas.height / dpr;
+
+        const startX = (this.selectionStart / this.audioDuration - this.scrollOffset) * this.zoomLevel * w;
+        const endX = (this.selectionEnd / this.audioDuration - this.scrollOffset) * this.zoomLevel * w;
+        const width = endX - startX;
+
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+        this.ctx.fillRect(startX, 0, width, h);
+        
+        // Border
+        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+        this.ctx.strokeRect(startX, 0, width, h);
+    }
+
     drawTracks() {
         this.resizeCanvas();
         if (!this.ctx) return;
@@ -386,6 +691,9 @@ export class MultiTrackTimeline {
         const uYawW = (window.uniforms && window.uniforms.uYaw) ? window.uniforms.uYaw.value : 0.1;
 
         this.ctx.clearRect(0, 0, w, h);
+
+        // Draw Segments first (underlay)
+        this.drawSegments();
 
         tracks.forEach((fullData, index) => {
             if (!fullData || fullData.length === 0) return;
@@ -471,6 +779,9 @@ export class MultiTrackTimeline {
             this.ctx.font = '10px monospace';
             this.ctx.fillText(labels[index], 5, yBase + 12);
         });
+
+        // Draw Selection Overlay on Top
+        this.drawSelectionOverlay();
     }
 
     updatePlayhead(currentTime, duration) {

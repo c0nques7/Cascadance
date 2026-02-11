@@ -443,8 +443,248 @@ function drawFrequencyMonitor(low, mid, high) {
     freqCtx.fillRect((barW + 5) * 2, h - hHigh, barW, hHigh);
 }
 
-const CAMERA_CONFIG = [
-    // --- SECTION 1: MANUAL POSITIONING ---
+// --- TIMELINE SEGMENTATION SYSTEM ---
+window.TAG_LIBRARY = {
+    'Build Up': { 
+        values: { uSpeed: 2.0, uColorShift: 0.8, uZoom: 1.2 }, 
+        transition: 'ease-in' 
+    },
+    'Drop': { 
+        values: { uSpeed: 5.0, uColorShift: 1.0, uGlow: 2.0, uPitch: 1.0 }, 
+        transition: 'cut' 
+    },
+    'Calm': { 
+        values: { uSpeed: 0.2, uSaturation: 0.5, uZoom: 2.0 }, 
+        transition: 'linear' 
+    }
+};
+
+window.activeSegments = [];
+
+// Helper: Linear Interpolation
+function lerp(start, end, amt) {
+    return (1 - amt) * start + amt * end;
+}
+
+// Helper: Get All Controllable Params (Global)
+window.getAllAvailableParams = () => {
+    const params = [];
+    // Camera
+    ALL_CAMERA_PARAMS.forEach(p => params.push({...p, type: 'Camera'}));
+    // Visuals
+    const shaderKeys = new Set();
+    Object.values(SHADER_PARAMS).forEach(arr => {
+        arr.forEach(p => {
+            if (!shaderKeys.has(p.name)) {
+                params.push({...p, type: 'Visual'});
+                shaderKeys.add(p.name);
+            }
+        });
+    });
+    // Color
+    params.push({ name: 'uBaseHue', label: 'Base Hue', min: 0, max: 360, type: 'Color' });
+    params.push({ name: 'uSaturation', label: 'Saturation', min: 0, max: 1, type: 'Color' });
+    params.push({ name: 'uColorShift', label: 'Color Shift', min: 0, max: 1, type: 'Color' });
+    return params;
+};
+
+function applyTimelineLogic(manualTargets) {
+    const currentTime = window.audio ? window.audio.currentTime : 0;
+    const currentSeg = window.activeSegments.find(seg => currentTime >= seg.start && currentTime <= seg.end);
+    
+    const targetConfig = currentSeg && currentSeg.tag ? window.TAG_LIBRARY[currentSeg.tag] : null;
+    
+    // Determine Blend Factor
+    let transition = 'linear';
+    if (targetConfig) transition = targetConfig.transition || 'linear';
+    
+    let blend = 0.1;
+    if (transition === 'cut') blend = 1.0;
+    else if (transition === 'ease-in') blend = 0.05;
+    else blend = 0.1;
+
+    // Identify all keys to update (Union of manual and tag)
+    const keys = new Set(Object.keys(manualTargets));
+    if (targetConfig && targetConfig.values) {
+        Object.keys(targetConfig.values).forEach(k => keys.add(k));
+    }
+
+    keys.forEach(key => {
+        if (!uniforms[key]) return;
+
+        // 1. Base: Manual Value (or current if not controlled manually)
+        let dest = manualTargets[key] !== undefined ? manualTargets[key] : uniforms[key].value;
+        
+        // 2. Override: Tag Value
+        if (targetConfig && targetConfig.values && targetConfig.values.hasOwnProperty(key)) {
+            dest = targetConfig.values[key];
+        }
+
+        // 3. Apply: Lerp
+        if (blend >= 1.0) {
+            uniforms[key].value = dest;
+        } else {
+            uniforms[key].value = lerp(uniforms[key].value, dest, blend);
+        }
+
+        // Sync Material
+        if (material && material.uniforms[key]) {
+            material.uniforms[key].value = uniforms[key].value;
+        }
+    });
+}
+
+// --- MODULATION MATRIX SYSTEM ---
+let activeModulators = [];
+
+const MOD_SOURCES = [
+    { id: 'lows', label: 'Bass' },
+    { id: 'mids', label: 'Snare' },
+    { id: 'highs', label: 'Hats' },
+    { id: 'vol', label: 'Volume' }
+];
+
+const MOD_TARGETS = [
+    { id: 'uPitch', label: 'Tilt' },
+    { id: 'uYaw', label: 'Spin' },
+    { id: 'uRoll', label: 'Twist' },
+    { id: 'uZoom', label: 'Zoom' },
+    { id: 'uColorShift', label: 'Color' },
+    { id: 'uSpeed', label: 'Speed' }
+];
+
+function applyModulations() {
+    // Reset exclusive FX uniforms to 0 before applying modulation
+    if (uniforms.uPitch) uniforms.uPitch.value = 0.0;
+    if (uniforms.uYaw) uniforms.uYaw.value = 0.0;
+    if (uniforms.uRoll) uniforms.uRoll.value = 0.0;
+
+    // We need access to current audio levels.
+    // They are in global vars: uBassValue, uMidValue, uHighValue.
+    // Let's create a map for easier access.
+    const audioLevels = {
+        lows: uBassValue,
+        mids: uMidValue,
+        highs: uHighValue,
+        vol: (uBassValue + uMidValue + uHighValue) / 3
+    };
+
+    activeModulators.forEach(mod => {
+        const audioVal = audioLevels[mod.source] || 0;
+        // Map Range: min + (audio * (max - min))
+        const modVal = mod.min + (audioVal * (mod.max - mod.min));
+        
+        if (uniforms[mod.target]) {
+            uniforms[mod.target].value += modVal;
+        }
+        
+        // Also update material uniforms if they exist (for shader parity)
+        if (material && material.uniforms[mod.target]) {
+            material.uniforms[mod.target].value = uniforms[mod.target].value;
+        }
+    });
+}
+
+function renderModulatorUI(container) {
+    // Container for the list
+    let listContainer = document.getElementById('modulator-list');
+    if (!listContainer) {
+        listContainer = document.createElement('div');
+        listContainer.id = 'modulator-list';
+        container.appendChild(listContainer);
+    } else {
+        listContainer.innerHTML = '';
+    }
+
+    // Render Rows
+    activeModulators.forEach((mod, index) => {
+        const row = document.createElement('div');
+        row.className = 'mod-row';
+
+        // Source Select
+        const sourceSel = document.createElement('select');
+        sourceSel.className = 'mod-select';
+        MOD_SOURCES.forEach(src => {
+            const opt = document.createElement('option');
+            opt.value = src.id;
+            opt.textContent = src.label;
+            if (src.id === mod.source) opt.selected = true;
+            sourceSel.appendChild(opt);
+        });
+        sourceSel.onchange = (e) => mod.source = e.target.value;
+        row.appendChild(sourceSel);
+
+        // Arrow
+        const arrow = document.createElement('span');
+        arrow.className = 'mod-arrow';
+        arrow.textContent = '→';
+        row.appendChild(arrow);
+
+        // Target Select
+        const targetSel = document.createElement('select');
+        targetSel.className = 'mod-select';
+        MOD_TARGETS.forEach(tgt => {
+            const opt = document.createElement('option');
+            opt.value = tgt.id;
+            opt.textContent = tgt.label;
+            if (tgt.id === mod.target) opt.selected = true;
+            targetSel.appendChild(opt);
+        });
+        targetSel.onchange = (e) => mod.target = e.target.value;
+        row.appendChild(targetSel);
+
+        // Min Input
+        const minInput = document.createElement('input');
+        minInput.className = 'mod-input';
+        minInput.type = 'number';
+        minInput.step = '0.1';
+        minInput.value = mod.min;
+        minInput.onchange = (e) => mod.min = parseFloat(e.target.value);
+        row.appendChild(minInput);
+
+        // Max Input
+        const maxInput = document.createElement('input');
+        maxInput.className = 'mod-input';
+        maxInput.type = 'number';
+        maxInput.step = '0.1';
+        maxInput.value = mod.max;
+        maxInput.onchange = (e) => mod.max = parseFloat(e.target.value);
+        row.appendChild(maxInput);
+
+        // Delete Button
+        const delBtn = document.createElement('button');
+        delBtn.className = 'mod-delete-btn';
+        delBtn.textContent = '✕';
+        delBtn.onclick = () => {
+            activeModulators.splice(index, 1);
+            renderModulatorUI(container);
+        };
+        row.appendChild(delBtn);
+
+        listContainer.appendChild(row);
+    });
+
+    // Add Button (Only render once if not present)
+    let addBtn = document.getElementById('add-modulator-btn');
+    if (!addBtn) {
+        addBtn = document.createElement('button');
+        addBtn.id = 'add-modulator-btn';
+        addBtn.textContent = '+ Add Modulator';
+        addBtn.onclick = () => {
+            activeModulators.push({
+                source: 'lows',
+                target: 'uPitch',
+                min: 0.0,
+                max: 0.5
+            });
+            renderModulatorUI(container);
+        };
+        container.appendChild(addBtn);
+    }
+}
+
+// --- CONFIGURATION SPLIT ---
+const CAMERA_POS = [
     { 
         name: 'uCamX', label: 'Pan X', min: -2.0, max: 2.0, value: 0.0, 
         automation: { enabled: false, source: 'uBass', strength: 0.0 } 
@@ -456,25 +696,13 @@ const CAMERA_CONFIG = [
     { 
         name: 'uZoom', label: 'Base Zoom', min: 0.1, max: 5.0, value: 1.5, 
         automation: { enabled: false, source: 'uBass', strength: 0.0 } 
-    },
-
-    // --- SECTION 2: AUDIO REACTIVITY (Intensity Multipliers) ---
-    { 
-        name: 'uPitch', label: 'Bass Wobble (Pitch)', min: 0.0, max: 1.0, value: 0.2, 
-        isIntensity: true, // Custom flag for animate loop
-        automation: { enabled: true, source: 'uBass', strength: 1.0 } 
-    },
-    { 
-        name: 'uYaw', label: 'High Spin (Yaw)', min: 0.0, max: 1.0, value: 0.1, 
-        isIntensity: true,
-        automation: { enabled: true, source: 'uHigh', strength: 1.0 } 
-    },
-    { 
-        name: 'uRoll', label: 'Mid Twist (Roll)', min: 0.0, max: 1.0, value: 0.3, 
-        isIntensity: true,
-        automation: { enabled: true, source: 'uMid', strength: 1.0 } 
     }
 ];
+
+const CAMERA_FX = []; // Deprecated in favor of Modulation Matrix
+
+// --- ANIMATION LOOP HELPER ---
+const ALL_CAMERA_PARAMS = [...CAMERA_POS];
 
 const SHADER_PARAMS = {
     menger: [
@@ -524,7 +752,7 @@ function captureDefaults(config) {
     }
 }
 
-captureDefaults(CAMERA_CONFIG);
+captureDefaults(ALL_CAMERA_PARAMS);
 captureDefaults(SHADER_PARAMS);
 
 const SHADER_LIB = {
@@ -808,7 +1036,7 @@ saturationInput.addEventListener('input', updateColorParams);
 colorShiftInput.addEventListener('input', updateColorParams);
 
 // Initialize Camera Uniforms
-CAMERA_CONFIG.forEach(param => {
+ALL_CAMERA_PARAMS.forEach(param => {
     // Ensure we use .value (new config) or fallback to .val (old config)
     const v = param.value !== undefined ? param.value : param.val;
     uniforms[param.name] = { value: v };
@@ -930,6 +1158,279 @@ function createSliderElement(param, container, onInput) {
     container.appendChild(row);
 }
 
+function renderTagEditor() {
+    const visualContent = document.querySelector('#visual-island .content-area');
+    if (!visualContent) return;
+
+    let container = document.getElementById('tag-editor-section');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'tag-editor-section';
+        container.style.marginTop = '20px';
+        container.style.borderTop = '1px solid rgba(255,255,255,0.1)';
+        container.style.paddingTop = '15px';
+        visualContent.appendChild(container);
+    }
+    container.innerHTML = '';
+
+    // State
+    let currentTag = Object.keys(window.TAG_LIBRARY)[0] || '';
+    let previewMode = true;
+
+    // Helper: Get All Params
+    const getAllAvailableParams = () => {
+        const params = [];
+        
+        // 1. Camera
+        ALL_CAMERA_PARAMS.forEach(p => params.push({...p, type: 'Camera'}));
+        
+        // 2. Visuals (Current Shader) - Note: This might change if shader changes
+        // For simplicity, we grab from 'menger' and 'tunnel' and unique by name
+        const shaderKeys = new Set();
+        Object.values(SHADER_PARAMS).forEach(arr => {
+            arr.forEach(p => {
+                if (!shaderKeys.has(p.name)) {
+                    params.push({...p, type: 'Visual'});
+                    shaderKeys.add(p.name);
+                }
+            });
+        });
+        
+        // 3. Color
+        params.push({ name: 'uBaseHue', label: 'Base Hue', min: 0, max: 360, value: 0, type: 'Color' });
+        params.push({ name: 'uSaturation', label: 'Saturation', min: 0, max: 1, value: 1, type: 'Color' });
+        params.push({ name: 'uColorShift', label: 'Color Shift', min: 0, max: 1, value: 0.5, type: 'Color' });
+        
+        return params;
+    };
+
+    // --- Header ---
+    const header = document.createElement('div');
+    header.className = 'tag-editor-row';
+    header.style.justifyContent = 'space-between';
+    
+    const title = document.createElement('h4');
+    title.textContent = 'TAG EDITOR';
+    title.style.margin = '0';
+    title.style.fontSize = '12px';
+    title.style.color = '#38bdf8';
+    title.style.letterSpacing = '1px';
+    header.appendChild(title);
+    container.appendChild(header);
+
+    // --- Controls Row (Select, Add, Delete) ---
+    const controls = document.createElement('div');
+    controls.className = 'tag-editor-row';
+    
+    const tagSelect = document.createElement('select');
+    tagSelect.className = 'tag-editor-select';
+    
+    const refreshSelect = () => {
+        tagSelect.innerHTML = '';
+        Object.keys(window.TAG_LIBRARY).forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t;
+            opt.textContent = t;
+            if (t === currentTag) opt.selected = true;
+            tagSelect.appendChild(opt);
+        });
+    };
+    refreshSelect();
+    
+    tagSelect.onchange = (e) => {
+        currentTag = e.target.value;
+        renderParamsList();
+    };
+    controls.appendChild(tagSelect);
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'tag-editor-btn';
+    addBtn.textContent = '+';
+    addBtn.title = 'New Tag';
+    addBtn.onclick = () => {
+        const name = prompt('New Tag Name:');
+        if (name && !window.TAG_LIBRARY[name]) {
+            window.TAG_LIBRARY[name] = { values: {}, transition: 'linear' };
+            currentTag = name;
+            refreshSelect();
+            renderParamsList();
+        }
+    };
+    controls.appendChild(addBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'tag-editor-btn danger';
+    delBtn.textContent = '✕';
+    delBtn.title = 'Delete Tag';
+    delBtn.onclick = () => {
+        if (!currentTag) return;
+        if (confirm(`Delete "${currentTag}"?`)) {
+            delete window.TAG_LIBRARY[currentTag];
+            const keys = Object.keys(window.TAG_LIBRARY);
+            currentTag = keys.length > 0 ? keys[0] : '';
+            refreshSelect();
+            renderParamsList();
+        }
+    };
+    controls.appendChild(delBtn);
+    container.appendChild(controls);
+
+    // --- Settings Row (Transition, Preview) ---
+    const settings = document.createElement('div');
+    settings.className = 'tag-editor-row';
+    
+    const transSelect = document.createElement('select');
+    transSelect.className = 'tag-editor-select';
+    ['linear', 'ease-in', 'cut'].forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t; // Capitalize?
+        transSelect.appendChild(opt);
+    });
+    transSelect.onchange = (e) => {
+        if (window.TAG_LIBRARY[currentTag]) {
+            window.TAG_LIBRARY[currentTag].transition = e.target.value;
+        }
+    };
+    settings.appendChild(transSelect);
+
+    const previewLabel = document.createElement('label');
+    previewLabel.style.fontSize = '11px';
+    previewLabel.style.color = '#ccc';
+    previewLabel.style.display = 'flex';
+    previewLabel.style.alignItems = 'center';
+    previewLabel.style.gap = '4px';
+    const previewCheck = document.createElement('input');
+    previewCheck.type = 'checkbox';
+    previewCheck.checked = previewMode;
+    previewCheck.onchange = (e) => {
+        previewMode = e.target.checked;
+        if (previewMode && currentTag) {
+            // Apply current
+            const vals = window.TAG_LIBRARY[currentTag].values;
+            for (const [k, v] of Object.entries(vals)) {
+                if (uniforms[k]) uniforms[k].value = v;
+            }
+        }
+    };
+    previewLabel.appendChild(previewCheck);
+    previewLabel.appendChild(document.createTextNode('Preview'));
+    settings.appendChild(previewLabel);
+    
+    container.appendChild(settings);
+
+    // --- Parameters List ---
+    const listContainer = document.createElement('div');
+    listContainer.className = 'tag-param-list';
+    container.appendChild(listContainer);
+
+    const renderParamsList = () => {
+        listContainer.innerHTML = '';
+        if (!currentTag) return;
+        
+        const config = window.TAG_LIBRARY[currentTag];
+        if (!config.values) config.values = {};
+        
+        // Sync Transition Select
+        transSelect.value = config.transition || 'linear';
+
+        const allParams = getAllAvailableParams();
+        
+        allParams.forEach(p => {
+            const row = document.createElement('div');
+            row.className = 'tag-param-row';
+            
+            const isIncluded = config.values.hasOwnProperty(p.name);
+            
+            // Checkbox
+            const check = document.createElement('input');
+            check.type = 'checkbox';
+            check.className = 'tag-param-check';
+            check.checked = isIncluded;
+            check.onchange = (e) => {
+                if (e.target.checked) {
+                    config.values[p.name] = uniforms[p.name] ? uniforms[p.name].value : (p.value || 0);
+                } else {
+                    delete config.values[p.name];
+                }
+                renderParamsList(); // Re-render to update slider state
+            };
+            row.appendChild(check);
+            
+            // Label
+            const label = document.createElement('span');
+            label.className = 'tag-param-label';
+            label.textContent = p.label || p.name;
+            label.title = p.name;
+            row.appendChild(label);
+            
+            // Slider
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.className = 'tag-param-slider';
+            slider.min = p.min;
+            slider.max = p.max;
+            slider.step = (p.max - p.min) / 100;
+            slider.disabled = !isIncluded;
+            
+            if (isIncluded) {
+                slider.value = config.values[p.name];
+                slider.style.opacity = '1';
+            } else {
+                slider.value = uniforms[p.name] ? uniforms[p.name].value : p.value;
+                slider.style.opacity = '0.3';
+            }
+            
+            slider.oninput = (e) => {
+                const val = parseFloat(e.target.value);
+                if (isIncluded) {
+                    config.values[p.name] = val;
+                    if (previewMode && uniforms[p.name]) {
+                        uniforms[p.name].value = val;
+                    }
+                }
+            };
+            
+            row.appendChild(slider);
+            listContainer.appendChild(row);
+        });
+    };
+    
+    renderParamsList();
+
+    // --- Footer (Capture) ---
+    const captureBtn = document.createElement('button');
+    captureBtn.className = 'tag-editor-btn primary';
+    captureBtn.textContent = 'CAPTURE SCENE';
+    captureBtn.onclick = () => {
+        if (!currentTag) return;
+        const config = window.TAG_LIBRARY[currentTag];
+        
+        // Capture ALL params that are currently checked? 
+        // Or capture EVERYTHING and check them?
+        // "Overwrites the editor's sliders with the current values from the Main controls."
+        // Usually capture implies capturing the *active* params.
+        // Let's iterate the displayed params and if checked, update value.
+        // OR better: Update value for ALL params, but only check the ones that were already checked?
+        // Prompt says "Overwrites... sliders...".
+        // Let's update all config.values entries.
+        
+        Object.keys(config.values).forEach(key => {
+            if (uniforms[key]) {
+                config.values[key] = uniforms[key].value;
+            }
+        });
+        
+        renderParamsList(); // Refresh sliders
+        
+        // Feedback
+        const origText = captureBtn.textContent;
+        captureBtn.textContent = 'CAPTURED!';
+        setTimeout(() => captureBtn.textContent = origText, 1000);
+    };
+    container.appendChild(captureBtn);
+}
+
 // --- Reset Logic: Execution ---
 function resetGroup(config, container) {
     if (!container) return;
@@ -984,7 +1485,16 @@ function initCameraControls() {
         
         resetBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            resetGroup(CAMERA_CONFIG, container);
+            // 1. Reset Data
+            ALL_CAMERA_PARAMS.forEach(param => {
+                if (param.defaultValue !== undefined) param.value = param.defaultValue;
+                if (param.defaultAutomation) {
+                    param.automation = JSON.parse(JSON.stringify(param.defaultAutomation));
+                }
+                if (uniforms[param.name]) uniforms[param.name].value = param.value;
+            });
+            // 2. Re-render Controls
+            initCameraControls();
         });
         
         // Insert before minimize button
@@ -994,21 +1504,39 @@ function initCameraControls() {
 
     container.innerHTML = '';
 
-    CAMERA_CONFIG.forEach(param => {
-        if (!uniforms[param.name]) {
-            // console.log(`Auto-initializing uniform: ${param.name}`);
-            uniforms[param.name] = { value: param.value };
-        }
+    // Helper to add Headers
+    const addHeader = (text) => {
+        const h = document.createElement('h5');
+        h.textContent = text;
+        h.style.margin = '10px 0 5px 0';
+        h.style.color = '#4db8ff'; // Neon Blue Accent
+        h.style.borderBottom = '1px solid rgba(77, 184, 255, 0.2)';
+        h.style.paddingBottom = '2px';
+        h.style.fontSize = '10px';
+        h.style.letterSpacing = '1px';
+        container.appendChild(h);
+    };
 
-        createSliderElement(param, container, (val) => {
-            if (material && material.uniforms[param.name]) {
-                material.uniforms[param.name].value = val;
-            }
-            if (uniforms[param.name]) {
-                uniforms[param.name].value = val;
-            }
+    // 1. Positioning Section
+    addHeader('POSITIONING');
+    CAMERA_POS.forEach(param => {
+        if (!uniforms[param.name]) uniforms[param.name] = { value: param.value };
+        createSliderElement(param, container, (val) => { 
+            if (material && material.uniforms[param.name]) material.uniforms[param.name].value = val;
+            uniforms[param.name].value = val; 
         });
     });
+
+    // 2. FX Section (Modulation Matrix)
+    addHeader('MODULATION MATRIX');
+    
+    // Create Container for Modulators
+    const modContainer = document.createElement('div');
+    modContainer.id = 'modulator-container';
+    container.appendChild(modContainer);
+    
+    // Initial Render
+    renderModulatorUI(modContainer);
 }
 
 function renderParams(styleKey) {
@@ -1078,6 +1606,7 @@ function setVisualizer(styleKey) {
 
 initCameraControls();
 setVisualizer('menger');
+renderTagEditor();
 
 visualStyleSelect.addEventListener('change', (e) => {
     e.stopPropagation();
@@ -1136,53 +1665,45 @@ function animate(time) {
         drawFrequencyMonitor(0, 0, 0);
     }
     
-    // --- Uniform Updates ---
+    // --- 1. Calculate Manual Targets ---
+    const manualTargets = {};
+    
+    // Global Uniforms
     uniforms.uBass.value = uBassValue;
     uniforms.uMid.value = uMidValue;
     uniforms.uHigh.value = uHighValue;
     uniforms.iTime.value = time * 0.001;
+    
+    // Color Palette
+    manualTargets['uBaseHue'] = parseFloat(baseHueInput.value);
+    manualTargets['uSaturation'] = parseFloat(saturationInput.value) / 100.0;
+    manualTargets['uColorShift'] = parseFloat(colorShiftInput.value);
 
-    // --- Parameter Automation & Live Metering ---
+    // Visual Params
     const currentStyle = visualStyleSelect.value;
     const activeParams = SHADER_PARAMS[currentStyle];
-    
     if (activeParams) {
         activeParams.forEach(param => {
             let finalVal = param.value;
-            
             if (param.automation && param.automation.enabled) {
-                // Determine audio source value
                 let sourceVal = 0;
                 if (param.automation.source === 'uBass') sourceVal = uBassValue;
                 else if (param.automation.source === 'uMid') sourceVal = uMidValue;
                 else if (param.automation.source === 'uHigh') sourceVal = uHighValue;
-                
-                // Calculate automated value
-                // Value = Base + (Source * Strength)
                 finalVal = param.value + (sourceVal * param.automation.strength);
-                
-                // Update UI Meter
-                if (param.uiMeter) {
-                    // Map value to 0-100% range
-                    const percent = Math.max(0, Math.min(100, ((finalVal - param.min) / (param.max - param.min)) * 100));
-                    param.uiMeter.style.width = `${percent}%`;
-                }
-            } else if (param.uiMeter) {
-                // Hide meter in manual mode
-                param.uiMeter.style.width = '0%';
             }
-
-            // Update Shader Uniform
-            if (material && material.uniforms[param.name]) {
-                material.uniforms[param.name].value = finalVal;
+            manualTargets[param.name] = finalVal;
+            
+            if (param.uiMeter) {
+                const percent = Math.max(0, Math.min(100, ((finalVal - param.min) / (param.max - param.min)) * 100));
+                param.uiMeter.style.width = `${percent}%`;
             }
         });
     }
 
-    // --- Camera Automation & Metering ---
-    CAMERA_CONFIG.forEach(param => {
+    // Camera Params
+    ALL_CAMERA_PARAMS.forEach(param => {
         let finalVal = param.value;
-        
         if (param.automation && param.automation.enabled) {
             let sourceVal = 0;
             if (param.automation.source === 'uBass') sourceVal = uBassValue;
@@ -1190,35 +1711,29 @@ function animate(time) {
             else if (param.automation.source === 'uHigh') sourceVal = uHighValue;
             
             if (param.isIntensity) {
-                // Slider sets the MAX AMPLITUDE of the reaction
                 finalVal = sourceVal * param.value;
             } else {
-                // Standard: Slider sets BASE value, Audio adds offset
                 finalVal = param.value + (sourceVal * param.automation.strength);
             }
-            
-            if (param.uiMeter) {
-                let percent = 0;
-                if (param.isIntensity) {
-                    // Normalize 0 to Max
-                    percent = (Math.abs(finalVal) / param.max) * 100;
-                } else {
-                    // Standard Range Mapping
-                    percent = ((finalVal - param.min) / (param.max - param.min)) * 100;
-                }
-                percent = Math.max(0, Math.min(100, percent));
-                param.uiMeter.style.width = `${percent}%`;
-            }
-        } else if (param.uiMeter) {
-            param.uiMeter.style.width = '0%';
         }
+        manualTargets[param.name] = finalVal;
         
-        // Update Uniform
-        if (material && material.uniforms[param.name]) {
-            material.uniforms[param.name].value = finalVal;
+        if (param.uiMeter) {
+            let percent = 0;
+            if (param.isIntensity) {
+                percent = (Math.abs(finalVal) / param.max) * 100;
+            } else {
+                percent = ((finalVal - param.min) / (param.max - param.min)) * 100;
+            }
+            param.uiMeter.style.width = `${Math.max(0, Math.min(100, percent))}%`;
         }
-        uniforms[param.name].value = finalVal;
     });
+
+    // --- 2. Apply Timeline Logic (Overrides & Mixing) ---
+    applyTimelineLogic(manualTargets);
+    
+    // --- 3. Apply Modulation Matrix (Offsets) ---
+    applyModulations();
 
     renderer.render(scene, camera);
 }

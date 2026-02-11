@@ -93,3 +93,179 @@
     flex-grow: 0 !important;
     height: auto !important; /* Override fixed height */
 }
+
+/* Modulation Matrix Styles */
+#modulator-container {
+    margin-top: 15px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.mod-row {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 5px;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 4px;
+    border-radius: 4px;
+}
+
+.mod-select {
+    background: transparent;
+    border: none;
+    color: #ccc;
+    font-size: 10px;
+    width: 60px;
+    cursor: pointer;
+}
+
+.mod-select option {
+    background: #222;
+    color: #ccc;
+}
+
+.mod-arrow {
+    font-size: 10px;
+    color: #888;
+}
+
+.mod-input {
+    width: 35px;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 2px;
+    color: #38bdf8;
+    font-size: 10px;
+    text-align: center;
+}
+
+.mod-delete-btn {
+    background: none;
+    border: none;
+    color: #ff4d4d;
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0 4px;
+}
+
+.mod-delete-btn:hover {
+    color: #ff0000;
+}
+
+#add-modulator-btn {
+    width: 100%;
+    margin-top: 8px;
+    background: rgba(56, 189, 248, 0.2);
+    border: 1px dashed rgba(56, 189, 248, 0.5);
+    color: #38bdf8;
+    font-size: 11px;
+    padding: 6px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+#add-modulator-btn:hover {
+    background: rgba(56, 189, 248, 0.3);
+}
+
+/* --- Tag Editor New Styles --- */
+.tag-editor-row {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 8px;
+    align-items: center;
+}
+
+.tag-param-list {
+    max-height: 200px;
+    overflow-y: auto;
+    background: rgba(0,0,0,0.2);
+    border-radius: 4px;
+    padding: 5px;
+    margin-bottom: 10px;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+
+.tag-param-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.tag-param-row:last-child {
+    border-bottom: none;
+}
+
+.tag-param-check {
+    cursor: pointer;
+}
+
+.tag-param-label {
+    font-size: 11px;
+    color: #aaa;
+    width: 80px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tag-param-slider {
+    flex-grow: 1;
+    height: 4px;
+    -webkit-appearance: none;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+}
+
+.tag-param-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #38bdf8;
+    cursor: pointer;
+}
+
+.tag-editor-btn {
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #eee;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.tag-editor-btn:hover {
+    background: rgba(255,255,255,0.2);
+}
+
+.tag-editor-btn.primary {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+    border-color: rgba(56, 189, 248, 0.4);
+    width: 100%;
+}
+
+.tag-editor-btn.primary:hover {
+    background: rgba(56, 189, 248, 0.3);
+}
+
+.tag-editor-btn.danger {
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.4);
+}
+
+.tag-editor-select {
+    background: rgba(0,0,0,0.3);
+    color: #eee;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 4px;
+    padding: 4px;
+    font-size: 11px;
+    flex-grow: 1;
+}
