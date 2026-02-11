@@ -303,6 +303,9 @@ function loadTrack(index) {
     audio = new Audio(trackPath);
     window.audio = audio;
     
+    // Show Loading
+    if (visualTimeline) visualTimeline.showLoading('Downloading & Decoding...');
+
     // Load full buffer for visualization
     console.log('Client: Fetching track...', trackPath);
     fetch(trackPath)
@@ -317,13 +320,20 @@ function loadTrack(index) {
         .then(audioBuffer => {
             console.log('Client: Audio decoded. Duration:', audioBuffer.duration);
             if (visualTimeline) {
+                visualTimeline.setLoadingText('Analyzing Audio Spectrum...');
                 console.log('Client: Calling visualTimeline.analyzeAudio');
                 visualTimeline.analyzeAudio(audioBuffer);
             } else {
                 console.error('Client: visualTimeline is not initialized!');
             }
         })
-        .catch(err => console.error('Client: Error loading waveform:', err));
+        .catch(err => {
+            console.error('Client: Error loading waveform:', err);
+            if (visualTimeline) {
+                visualTimeline.setLoadingText('Error Loading Track');
+                setTimeout(() => visualTimeline.hideLoading(), 2000);
+            }
+        });
 
     if (source) source.disconnect();
     source = audioContext.createMediaElementSource(audio);
@@ -446,14 +456,17 @@ function drawFrequencyMonitor(low, mid, high) {
 // --- TIMELINE SEGMENTATION SYSTEM ---
 window.TAG_LIBRARY = {
     'Build Up': { 
+        color: '#ffaa00',
         values: { uSpeed: 2.0, uColorShift: 0.8, uZoom: 1.2 }, 
         transition: 'ease-in' 
     },
     'Drop': { 
+        color: '#ff0000',
         values: { uSpeed: 5.0, uColorShift: 1.0, uGlow: 2.0, uPitch: 1.0 }, 
         transition: 'cut' 
     },
     'Calm': { 
+        color: '#00ccff',
         values: { uSpeed: 0.2, uSaturation: 0.5, uZoom: 2.0 }, 
         transition: 'linear' 
     }
@@ -1431,6 +1444,335 @@ function renderTagEditor() {
     container.appendChild(captureBtn);
 }
 
+// --- Tag Manager System ---
+
+function renderTagManager() {
+    const visualContent = document.querySelector('#visual-island .content-area');
+    if (!visualContent) return;
+
+    let container = document.getElementById('tag-manager-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'tag-manager-container';
+        visualContent.appendChild(container);
+    }
+    container.innerHTML = '';
+
+    const header = document.createElement('h4');
+    header.textContent = 'TAG MANAGER';
+    header.style.margin = '0 0 10px 0';
+    header.style.fontSize = '12px';
+    header.style.color = '#38bdf8';
+    header.style.letterSpacing = '1px';
+    container.appendChild(header);
+
+    const list = document.createElement('div');
+    list.className = 'tag-list';
+    container.appendChild(list);
+
+    // Render Cards
+    const tags = Object.keys(window.TAG_LIBRARY || {});
+    tags.forEach(tagKey => {
+        list.appendChild(createTagCard(tagKey));
+    });
+
+    // Add New Tag Button
+    const addBtn = document.createElement('button');
+    addBtn.className = 'add-tag-btn';
+    addBtn.textContent = '+ Create New Tag';
+    addBtn.onclick = () => {
+        const newName = `New Tag ${tags.length + 1}`;
+        // Create default entry
+        window.TAG_LIBRARY[newName] = {
+            color: '#888888',
+            transition: 'linear',
+            values: {}
+        };
+        // Re-render and Expand
+        renderTagManager();
+        // Find the new card and expand it
+        const cards = list.querySelectorAll('.tag-card');
+        const lastCard = cards[cards.length - 1]; // Assuming appended last
+        if (lastCard) expandTagCard(lastCard, newName);
+    };
+    container.appendChild(addBtn);
+}
+
+function createTagCard(tagKey) {
+    const config = window.TAG_LIBRARY[tagKey];
+    const card = document.createElement('div');
+    card.className = 'tag-card';
+    card.dataset.tag = tagKey;
+
+    // Header (Always Visible)
+    const header = document.createElement('div');
+    header.className = 'tag-card-header';
+    
+    const dot = document.createElement('div');
+    dot.className = 'color-dot';
+    dot.style.backgroundColor = config.color || '#ccc';
+    header.appendChild(dot);
+
+    const label = document.createElement('span');
+    label.className = 'tag-label';
+    label.textContent = tagKey;
+    header.appendChild(label);
+
+    const actions = document.createElement('div');
+    actions.className = 'tag-actions';
+
+    // Edit Button
+    const editBtn = document.createElement('button');
+    editBtn.className = 'tag-action-btn';
+    editBtn.innerHTML = '✎';
+    editBtn.title = 'Edit';
+    editBtn.onclick = (e) => {
+        e.stopPropagation();
+        expandTagCard(card, tagKey);
+    };
+    actions.appendChild(editBtn);
+
+    // Delete Button
+    const delBtn = document.createElement('button');
+    delBtn.className = 'tag-action-btn delete';
+    delBtn.innerHTML = '✕';
+    delBtn.title = 'Delete';
+    delBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (confirm(`Delete tag "${tagKey}"?`)) {
+            delete window.TAG_LIBRARY[tagKey];
+            renderTagManager();
+        }
+    };
+    actions.appendChild(delBtn);
+
+    header.appendChild(actions);
+    card.appendChild(header);
+
+    // Editor Container (Hidden by default)
+    const editorContainer = document.createElement('div');
+    editorContainer.className = 'tag-editor-container';
+    card.appendChild(editorContainer);
+
+    return card;
+}
+
+function expandTagCard(card, tagKey) {
+    // 1. Collapse all others
+    document.querySelectorAll('.tag-card.expanded').forEach(c => {
+        if (c !== card) {
+            c.classList.remove('expanded');
+            c.querySelector('.tag-editor-container').innerHTML = '';
+        }
+    });
+
+    // 2. Toggle this one
+    if (card.classList.contains('expanded')) {
+        card.classList.remove('expanded');
+        card.querySelector('.tag-editor-container').innerHTML = '';
+        return;
+    }
+
+    card.classList.add('expanded');
+    const container = card.querySelector('.tag-editor-container');
+    renderTagEditorPanel(container, tagKey, card);
+}
+
+function renderTagEditorPanel(container, tagKey, card) {
+    const config = window.TAG_LIBRARY[tagKey];
+    container.innerHTML = '';
+    
+    const panel = document.createElement('div');
+    panel.className = 'tag-editor-panel';
+
+    // --- Row 1: Name & Color ---
+    const row1 = document.createElement('div');
+    row1.className = 'editor-row';
+    
+    const nameInput = document.createElement('input');
+    nameInput.className = 'editor-input';
+    nameInput.value = tagKey;
+    nameInput.placeholder = 'Tag Name';
+    row1.appendChild(nameInput);
+
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.className = 'editor-color';
+    colorInput.value = config.color || '#cccccc';
+    colorInput.title = 'Timeline Color';
+    row1.appendChild(colorInput);
+    panel.appendChild(row1);
+
+    // --- Row 2: Transition & Capture ---
+    const row2 = document.createElement('div');
+    row2.className = 'editor-row';
+
+    const transSelect = document.createElement('select');
+    transSelect.className = 'editor-input';
+    ['linear', 'ease-in', 'cut'].forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t;
+        if (config.transition === t) opt.selected = true;
+        transSelect.appendChild(opt);
+    });
+    row2.appendChild(transSelect);
+
+    const captureBtn = document.createElement('button');
+    captureBtn.className = 'editor-btn primary';
+    captureBtn.textContent = 'CAPTURE STATE';
+    captureBtn.title = 'Overwrite sliders with current scene';
+    row2.appendChild(captureBtn);
+    panel.appendChild(row2);
+
+    // --- Row 3: Parameters List ---
+    const paramList = document.createElement('div');
+    paramList.className = 'param-list';
+    
+    // Helper to render sliders
+    const allParams = getAllAvailableParams();
+    // Working copy of values
+    let currentValues = { ...config.values };
+
+    const renderSliders = () => {
+        paramList.innerHTML = '';
+        allParams.forEach(p => {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.gap = '5px';
+            row.style.marginBottom = '4px';
+
+            const isIncluded = currentValues.hasOwnProperty(p.name);
+
+            // Checkbox
+            const check = document.createElement('input');
+            check.type = 'checkbox';
+            check.checked = isIncluded;
+            check.onchange = (e) => {
+                if (e.target.checked) {
+                    currentValues[p.name] = uniforms[p.name] ? uniforms[p.name].value : (p.value || 0);
+                } else {
+                    delete currentValues[p.name];
+                }
+                renderSliders();
+            };
+            row.appendChild(check);
+
+            // Label
+            const label = document.createElement('span');
+            label.textContent = p.label || p.name;
+            label.style.fontSize = '10px';
+            label.style.color = '#aaa';
+            label.style.width = '70px';
+            label.style.overflow = 'hidden';
+            label.style.textOverflow = 'ellipsis';
+            row.appendChild(label);
+
+            // Slider
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.style.flexGrow = '1';
+            slider.style.height = '4px';
+            slider.min = p.min;
+            slider.max = p.max;
+            slider.step = (p.max - p.min) / 100;
+            slider.disabled = !isIncluded;
+            
+            if (isIncluded) {
+                slider.value = currentValues[p.name];
+            } else {
+                slider.value = uniforms[p.name] ? uniforms[p.name].value : p.value;
+                slider.style.opacity = '0.3';
+            }
+
+            slider.oninput = (e) => {
+                const val = parseFloat(e.target.value);
+                if (isIncluded) {
+                    currentValues[p.name] = val;
+                    // Live Preview
+                    if (uniforms[p.name]) uniforms[p.name].value = val;
+                }
+            };
+            row.appendChild(slider);
+            paramList.appendChild(row);
+        });
+    };
+    renderSliders();
+    panel.appendChild(paramList);
+
+    // Capture Logic
+    captureBtn.onclick = () => {
+        Object.keys(currentValues).forEach(key => {
+            if (uniforms[key]) {
+                currentValues[key] = uniforms[key].value;
+            }
+        });
+        renderSliders();
+    };
+
+    // --- Row 4: Actions ---
+    const row4 = document.createElement('div');
+    row4.className = 'editor-row';
+    row4.style.justifyContent = 'flex-end';
+    row4.style.marginTop = '10px';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'editor-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = () => {
+        card.classList.remove('expanded');
+        container.innerHTML = '';
+    };
+    row4.appendChild(cancelBtn);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'editor-btn primary';
+    saveBtn.textContent = 'Save Changes';
+    saveBtn.onclick = () => {
+        handleSaveTag(tagKey, {
+            newName: nameInput.value,
+            color: colorInput.value,
+            transition: transSelect.value,
+            values: currentValues
+        });
+    };
+    row4.appendChild(saveBtn);
+    panel.appendChild(row4);
+
+    container.appendChild(panel);
+}
+
+function handleSaveTag(originalKey, data) {
+    const { newName, color, transition, values } = data;
+    
+    // Validation
+    if (!newName.trim()) return alert('Name required');
+    if (newName !== originalKey && window.TAG_LIBRARY[newName]) return alert('Tag name exists');
+
+    // Delete old if renamed
+    if (newName !== originalKey) {
+        delete window.TAG_LIBRARY[originalKey];
+        // Update Segments
+        if (window.activeSegments) {
+            window.activeSegments.forEach(seg => {
+                if (seg.tag === originalKey) seg.tag = newName;
+            });
+        }
+    }
+
+    // Save
+    window.TAG_LIBRARY[newName] = {
+        color: color,
+        transition: transition,
+        values: values
+    };
+
+    // Refresh UI
+    renderTagManager();
+    if (window.visualTimeline) window.visualTimeline.drawTracks();
+}
+
 // --- Reset Logic: Execution ---
 function resetGroup(config, container) {
     if (!container) return;
@@ -1606,7 +1948,7 @@ function setVisualizer(styleKey) {
 
 initCameraControls();
 setVisualizer('menger');
-renderTagEditor();
+renderTagManager();
 
 visualStyleSelect.addEventListener('change', (e) => {
     e.stopPropagation();
