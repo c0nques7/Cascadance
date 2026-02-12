@@ -511,6 +511,12 @@ export class MultiTrackTimeline {
                 return;
             }
 
+            // 2.5 Fade Handles
+            if (hit && (hit.type === 'fade-in' || hit.type === 'fade-out') && e.button === 0) {
+                this.fadeDragState = hit;
+                return;
+            }
+
             // 3. Right Click or Shift+Click (Select/Edit)
             if (e.button === 2 || e.shiftKey) {
                 if (hit && (hit.type === 'body' || hit.type === 'resize')) {
@@ -535,6 +541,41 @@ export class MultiTrackTimeline {
         });
 
         window.addEventListener('mousemove', (e) => {
+            if (this.fadeDragState) {
+                e.preventDefault();
+                const time = getTimeFromEvent(e);
+                const seg = this.fadeDragState.segment;
+                const config = this.fadeDragState.config;
+                
+                if (!config.transition) config.transition = {};
+
+                if (this.fadeDragState.type === 'fade-in') {
+                    let newDur = time - seg.start;
+                    const maxDur = (seg.end - seg.start) - ((config.useADSR && config.adsr ? config.adsr.release : (config.transition ? config.transition.fadeOutDuration : 0)) || 0);
+                    newDur = Math.max(0, Math.min(newDur, maxDur));
+                    
+                    if (config.useADSR && config.adsr) {
+                        config.adsr.attack = newDur;
+                    } else {
+                        if (!config.transition) config.transition = {};
+                        config.transition.duration = newDur;
+                    }
+                } else {
+                    let newDur = seg.end - time;
+                    const maxDur = (seg.end - seg.start) - ((config.useADSR && config.adsr ? config.adsr.attack : (config.transition ? config.transition.duration : 0)) || 0);
+                    newDur = Math.max(0, Math.min(newDur, maxDur));
+                    
+                    if (config.useADSR && config.adsr) {
+                        config.adsr.release = newDur;
+                    } else {
+                        if (!config.transition) config.transition = {};
+                        config.transition.fadeOutDuration = newDur;
+                    }
+                }
+                this.drawTracks();
+                return;
+            }
+
             if (this.moveState) {
                 e.preventDefault();
                 const time = getTimeFromEvent(e);
@@ -639,7 +680,7 @@ export class MultiTrackTimeline {
         });
 
         this.canvasContainer.addEventListener('mousemove', (e) => {
-            if (!isSeekDragging && !this.isSelecting && !this.resizingState && !isPanning && !this.moveState) {
+            if (!isSeekDragging && !this.isSelecting && !this.resizingState && !isPanning && !this.moveState && !this.fadeDragState) {
                 const rect = this.canvasContainer.getBoundingClientRect();
                 const x = e.clientX - rect.left;
                 const y = e.clientY - rect.top;
@@ -647,6 +688,9 @@ export class MultiTrackTimeline {
                 
                 if (hit && hit.type === 'resize') {
                     this.canvasContainer.style.cursor = 'col-resize';
+                    this.tooltip.style.display = 'none';
+                } else if (hit && (hit.type === 'fade-in' || hit.type === 'fade-out')) {
+                    this.canvasContainer.style.cursor = 'ew-resize';
                     this.tooltip.style.display = 'none';
                 } else if (hit && hit.type === 'body') {
                     this.canvasContainer.style.cursor = 'context-menu';
@@ -663,6 +707,10 @@ export class MultiTrackTimeline {
         });
 
         window.addEventListener('mouseup', (e) => {
+            if (this.fadeDragState) {
+                this.fadeDragState = null;
+            }
+
             isPanning = false;
             // Move state handled in mousedown (click to place)
             
@@ -824,7 +872,33 @@ export class MultiTrackTimeline {
             if (Math.abs(x - endX) < threshold) return { type: 'resize', segment: seg, edge: 'end' };
         }
 
-        // 2. Check Body (Move/Edit) - Inside rect
+        // 2. Check Fade Handles - Threshold 5px
+        if (window.TAG_LIBRARY) {
+             for (const seg of window.activeSegments) {
+                if (!seg.tag || !window.TAG_LIBRARY[seg.tag]) continue;
+                const config = window.TAG_LIBRARY[seg.tag];
+                
+                let fadeIn = 0;
+                let fadeOut = 0;
+
+                if (config.useADSR && config.adsr) {
+                    fadeIn = config.adsr.attack || 0;
+                    fadeOut = config.adsr.release || 0;
+                } else {
+                    const transition = config.transition || {};
+                    fadeIn = transition.duration || 0;
+                    fadeOut = transition.fadeOutDuration || 0;
+                }
+                
+                const fadeInX = this.getXFromTime(seg.start + fadeIn);
+                const fadeOutX = this.getXFromTime(seg.end - fadeOut);
+
+                if (Math.abs(x - fadeInX) < 5) return { type: 'fade-in', segment: seg, config: config };
+                if (Math.abs(x - fadeOutX) < 5) return { type: 'fade-out', segment: seg, config: config };
+             }
+        }
+
+        // 3. Check Body (Move/Edit) - Inside rect
         for (const seg of window.activeSegments) {
             const startX = this.getXFromTime(seg.start);
             const endX = this.getXFromTime(seg.end);
@@ -854,8 +928,20 @@ export class MultiTrackTimeline {
 
             // Determine Color based on Tag
             let color = '#ffa500'; // Default Orange
-            if (seg.tag && window.TAG_LIBRARY && window.TAG_LIBRARY[seg.tag] && window.TAG_LIBRARY[seg.tag].color) {
-                color = window.TAG_LIBRARY[seg.tag].color;
+            let fadeInDur = 0;
+            let fadeOutDur = 0;
+
+            if (seg.tag && window.TAG_LIBRARY && window.TAG_LIBRARY[seg.tag]) {
+                const config = window.TAG_LIBRARY[seg.tag];
+                if (config.color) color = config.color;
+                
+                if (config.useADSR && config.adsr) {
+                    fadeInDur = config.adsr.attack || 0;
+                    fadeOutDur = config.adsr.release || 0;
+                } else if (config.transition) {
+                    fadeInDur = config.transition.duration || 0;
+                    fadeOutDur = config.transition.fadeOutDuration || 0;
+                }
             }
 
             // Error State (Collision)
@@ -871,6 +957,28 @@ export class MultiTrackTimeline {
             this.ctx.fillStyle = color;
             this.ctx.globalAlpha = 0.3;
             this.ctx.fillRect(startX, 0, width, h);
+
+            // Draw Fade In Overlay (Attack)
+            const fadeInPixels = fadeInDur * pps;
+            if (fadeInPixels > 0) {
+                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+                this.ctx.fillRect(startX, 0, Math.min(fadeInPixels, width), h);
+                // Handle Line
+                this.ctx.fillStyle = '#fff';
+                this.ctx.fillRect(startX + Math.min(fadeInPixels, width) - 1, 0, 2, h);
+            }
+
+            // Draw Fade Out Overlay (Release)
+            const fadeOutPixels = fadeOutDur * pps;
+            if (fadeOutPixels > 0) {
+                this.ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                const fadeOutStartX = startX + width - fadeOutPixels;
+                this.ctx.fillRect(Math.max(startX, fadeOutStartX), 0, Math.min(fadeOutPixels, width), h);
+                // Handle Line
+                this.ctx.fillStyle = '#fff';
+                this.ctx.fillRect(Math.max(startX, fadeOutStartX) - 1, 0, 2, h);
+            }
+
             this.ctx.restore();
             this.ctx.shadowBlur = 0; // Reset
             
@@ -964,16 +1072,59 @@ export class MultiTrackTimeline {
             const stepX = pixelsPerSecond / samplesPerSec;
 
             if (isHueStrip) {
-                // Hue Strip Optimization: Draw larger blocks if stepX is small?
-                // For now, draw rects.
-                const barWidth = Math.ceil(stepX) + 1; // +1 to avoid gaps
+                // Helper: Hex to RGB 0-255
+                const hexToRgb = (hex) => {
+                    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+                    return result ? {
+                        r: parseInt(result[1], 16),
+                        g: parseInt(result[2], 16),
+                        b: parseInt(result[3], 16)
+                    } : { r: 255, g: 255, b: 255 };
+                };
+                
+                // Helper: THREE.Color or Hex to RGB 0-255
+                const getCol = (val) => {
+                    if (val && val.isColor) return { r: val.r * 255, g: val.g * 255, b: val.b * 255 };
+                    if (typeof val === 'string') return hexToRgb(val);
+                    return { r: 255, g: 255, b: 255 };
+                };
+
+                let defBase = { r: 255, g: 255, b: 255 };
+                let defMid = { r: 0, g: 255, b: 0 };
+                
+                if (window.uniforms) {
+                    if (window.uniforms.uBaseColor) defBase = getCol(window.uniforms.uBaseColor.value);
+                    if (window.uniforms.uMidColor) defMid = getCol(window.uniforms.uMidColor.value);
+                }
+
+                const barWidth = Math.ceil(stepX) + 1;
+                
                 for (let i = startIdx; i < endIdx; i++) {
-                    const val = visibleData[i];
+                    const val = visibleData[i]; // Audio amplitude (0-1 approx)
                     const x = (i * stepX) - this.scrollX;
                     if (x < -barWidth || x > w) continue;
                     
-                    const hue = (this.colorParams.hue + (val * this.colorParams.shift * 180)) % 360;
-                    this.ctx.fillStyle = `hsl(${hue}, ${this.colorParams.sat}%, 50%)`;
+                    const time = i / samplesPerSec;
+                    let cBase = defBase;
+                    let cMid = defMid;
+
+                    // Check for Tag Override
+                    if (window.activeSegments) {
+                        const seg = window.activeSegments.find(s => time >= s.start && time <= s.end);
+                        if (seg && window.TAG_LIBRARY[seg.tag] && window.TAG_LIBRARY[seg.tag].values) {
+                            const vals = window.TAG_LIBRARY[seg.tag].values;
+                            if (vals.uBaseColor) cBase = getCol(vals.uBaseColor);
+                            if (vals.uMidColor) cMid = getCol(vals.uMidColor);
+                        }
+                    }
+                    
+                    // Additive Mixing: Base + (Mid * Audio)
+                    // Note: This approximates the shader logic: col = Base + AudioReact
+                    const r = Math.min(255, cBase.r + (cMid.r * val));
+                    const g = Math.min(255, cBase.g + (cMid.g * val));
+                    const b = Math.min(255, cBase.b + (cMid.b * val));
+                    
+                    this.ctx.fillStyle = `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`;
                     this.ctx.fillRect(x, yBase, barWidth, trackH);
                 }
             } else if (isCameraTrack) {

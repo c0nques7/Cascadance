@@ -291,7 +291,12 @@
             <div id="parameter-container"></div>
             
             <div class="color-palette-section" style="margin-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 15px;">
-                <h4 style="margin: 0 0 10px 0; font-size: 12px; color: #38bdf8; text-transform: uppercase; letter-spacing: 1px;">Color Palette</h4>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h4 style="margin: 0; font-size: 12px; color: #38bdf8; text-transform: uppercase; letter-spacing: 1px;">Color Palette</h4>
+                    <label style="display: flex; align-items: center; gap: 5px; font-size: 10px; color: #aaa; cursor: pointer;">
+                        <input type="checkbox" id="manual-color-toggle" checked style="margin: 0;"> Enable
+                    </label>
+                </div>
                 
                 <div class="param-row">
                     <div class="param-info">
@@ -361,7 +366,7 @@
             <button class="minimize-btn" data-tooltip="Minimize / Expand">[-]</button>
         </div>
         <div class="content-area" style="padding: 0; height: calc(100% - 40px); overflow: hidden;">
-            <div id="timeline-container" style="width: 100%; height: 100%; position: relative;" data-tooltip="Click to Seek. Hover to inspect values. Bottom track shows Camera Automation."></div>
+            <div id="timeline-container" style="width: 100%; height: 100%; position: relative;"></div>
         </div>
     </div>
 

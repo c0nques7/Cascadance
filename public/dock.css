@@ -347,3 +347,28 @@
     color: #fff;
     border-color: rgba(255, 255, 255, 0.4);
 }
+
+/* --- ADSR Editor --- */
+.adsr-editor-container {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    padding: 5px;
+}
+
+.adsr-inputs input {
+    background: rgba(255, 255, 255, 0.1) !important;
+    border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    color: #fff !important;
+    border-radius: 3px;
+    padding: 2px 4px;
+    font-family: monospace;
+    font-size: 10px;
+    transition: border-color 0.2s;
+}
+
+.adsr-inputs input:focus {
+    border-color: #38bdf8 !important;
+    outline: none;
+    background: rgba(255, 255, 255, 0.15) !important;
+}
+

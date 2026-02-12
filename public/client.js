@@ -458,17 +458,17 @@ window.TAG_LIBRARY = {
     'Build Up': { 
         color: '#ffaa00',
         values: { uSpeed: 2.0, uColorShift: 0.8, uZoom: 1.2 }, 
-        transition: 'ease-in' 
+        transition: { duration: 2.0, curve: 'easeInQuad' } 
     },
     'Drop': { 
         color: '#ff0000',
         values: { uSpeed: 5.0, uColorShift: 1.0, uGlow: 2.0, uPitch: 1.0 }, 
-        transition: 'cut' 
+        transition: { duration: 0.0, curve: 'linear' } 
     },
     'Calm': { 
         color: '#00ccff',
         values: { uSpeed: 0.2, uSaturation: 0.5, uZoom: 2.0 }, 
-        transition: 'linear' 
+        transition: { duration: 2.0, curve: 'linear' } 
     }
 };
 
@@ -478,6 +478,15 @@ window.activeSegments = [];
 function lerp(start, end, amt) {
     return (1 - amt) * start + amt * end;
 }
+
+const EASING = {
+    linear: t => t,
+    easeInQuad: t => t * t,
+    easeOutQuad: t => t * (2 - t),
+    easeInOutQuad: t => t < .5 ? 2 * t * t : -1 + (4 - 2 * t) * t,
+    easeInCubic: t => t * t * t,
+    easeOutCubic: t => (--t) * t * t + 1
+};
 
 // Helper: Get All Controllable Params (Global)
 window.getAllAvailableParams = () => {
@@ -494,52 +503,150 @@ window.getAllAvailableParams = () => {
             }
         });
     });
-    // Color
-    params.push({ name: 'uBaseHue', label: 'Base Hue', min: 0, max: 360, type: 'Color' });
-    params.push({ name: 'uSaturation', label: 'Saturation', min: 0, max: 1, type: 'Color' });
-    params.push({ name: 'uColorShift', label: 'Color Shift', min: 0, max: 1, type: 'Color' });
+    // Color / Advanced Visuals
+    params.push({ name: 'uBaseColor', label: 'Base Color', inputType: 'color', type: 'Color' });
+    params.push({ name: 'uHighlight', label: 'Highlight', inputType: 'color', type: 'Color' });
+    params.push({ name: 'uLowlight', label: 'Lowlight', inputType: 'color', type: 'Color' });
+    params.push({ name: 'uHighColor', label: 'High Resp', inputType: 'color', type: 'Color' });
+    params.push({ name: 'uMidColor', label: 'Mid Resp', inputType: 'color', type: 'Color' });
+    params.push({ name: 'uLowColor', label: 'Low Resp', inputType: 'color', type: 'Color' });
+    
+    params.push({ name: 'uGlowStrength', label: 'Glow Str', min: 0.0, max: 5.0, type: 'Visual' });
+    params.push({ name: 'uBloomStrength', label: 'Bloom Str', min: 0.0, max: 2.0, type: 'Visual' });
+    
     return params;
 };
 
 function applyTimelineLogic(manualTargets) {
-    const currentTime = window.audio ? window.audio.currentTime : 0;
-    const currentSeg = window.activeSegments.find(seg => currentTime >= seg.start && currentTime <= seg.end);
-    
-    const targetConfig = currentSeg && currentSeg.tag ? window.TAG_LIBRARY[currentSeg.tag] : null;
-    
-    // Determine Blend Factor
-    let transition = 'linear';
-    if (targetConfig) transition = targetConfig.transition || 'linear';
-    
-    let blend = 0.1;
-    if (transition === 'cut') blend = 1.0;
-    else if (transition === 'ease-in') blend = 0.05;
-    else blend = 0.1;
-
-    // Identify all keys to update (Union of manual and tag)
-    const keys = new Set(Object.keys(manualTargets));
-    if (targetConfig && targetConfig.values) {
-        Object.keys(targetConfig.values).forEach(k => keys.add(k));
+    // 0. Preview Mode Override (Editor active)
+    if (typeof previewMode !== 'undefined' && previewMode && typeof currentTag !== 'undefined' && currentTag && window.TAG_LIBRARY[currentTag]) {
+        const config = window.TAG_LIBRARY[currentTag];
+        const values = config.values || {};
+        
+        Object.keys(values).forEach(key => {
+            if (!uniforms[key]) return;
+            const tagVal = values[key];
+            
+            if (uniforms[key].value && uniforms[key].value.isColor) {
+                const targetColor = new THREE.Color(tagVal);
+                uniforms[key].value.copy(targetColor);
+            } else {
+                uniforms[key].value = tagVal;
+            }
+        });
+        
+        // Also apply material sync if needed
+        if (typeof material !== 'undefined' && material) {
+            Object.keys(values).forEach(key => {
+                if (material.uniforms[key]) material.uniforms[key].value = uniforms[key].value;
+            });
+        }
+        return;
     }
 
-    keys.forEach(key => {
+    const currentTime = window.audio ? window.audio.currentTime : 0;
+    
+    // 1. Find Active Segment
+    const currentSeg = window.activeSegments.find(seg => 
+        currentTime >= seg.start && currentTime <= seg.end
+    );
+
+    // 2. Default: Just use manual targets if no tag
+    if (!currentSeg || !currentSeg.tag || !window.TAG_LIBRARY[currentSeg.tag]) {
+        // Smoothly return to manual if we were controlled? 
+        // For now, let's assume we drift back to manual.
+        // We can check if we need to drift back, but for now strict return to manual is safer for logic.
+        Object.keys(manualTargets).forEach(key => {
+            if (uniforms[key]) {
+                // simple drift back
+                 // Note: Since we don't have a 'previous' state stored, immediate return 
+                 // might jump. Ideally we'd lerp here too, but let's stick to the requested logic.
+                 // The prompt suggested: "drift back... lerp... 0.1"
+                uniforms[key].value = lerp(uniforms[key].value, manualTargets[key], 0.1); 
+            }
+        });
+        return;
+    }
+
+    const config = window.TAG_LIBRARY[currentSeg.tag];
+    let weight = 0;
+
+    if (config.useADSR && config.adsr) {
+        const t = currentTime - currentSeg.start;
+        const dur = currentSeg.end - currentSeg.start;
+        const { attack, decay, sustain, release } = config.adsr;
+
+        // 1. Attack
+        if (t < attack) {
+             weight = (attack > 0) ? (t / attack) : 1.0;
+        } 
+        // 2. Decay
+        else if (t < attack + decay) {
+            const decayProgress = (decay > 0) ? (t - attack) / decay : 1.0;
+            weight = 1.0 - (decayProgress * (1.0 - sustain));
+        } 
+        // 3. Sustain
+        else if (t < dur - release) {
+            weight = sustain;
+        } 
+        // 4. Release
+        else {
+             const releaseTime = t - (dur - release);
+             const releaseProgress = (release > 0) ? (releaseTime / release) : 1.0;
+             weight = sustain * (1.0 - releaseProgress);
+        }
+        weight = Math.max(0, Math.min(1.0, weight)) || 0;
+    } else {
+        const trans = config.transition || { duration: 0.5, curve: 'linear' }; // Default fallback
+
+        // 3. Calculate Weight based on Time
+        const elapsed = currentTime - currentSeg.start;
+        let progress = 0;
+
+        if (trans.duration <= 0) {
+            progress = 1.0; // Instant Cut
+        } else {
+            progress = Math.min(elapsed / trans.duration, 1.0);
+        }
+
+        // 4. Apply Easing
+        const easeFn = (trans.curve && EASING[trans.curve]) ? EASING[trans.curve] : EASING.linear;
+        weight = easeFn(progress);
+    }
+
+    // 5. Apply Values (Lerp from Manual -> Tag based on Weight)
+    const targetValues = config.values || {};
+    
+    // Iterate all controlled keys (Manual + Tag keys)
+    const allKeys = new Set([...Object.keys(manualTargets), ...Object.keys(targetValues)]);
+
+    allKeys.forEach(key => {
         if (!uniforms[key]) return;
 
-        // 1. Base: Manual Value (or current if not controlled manually)
-        let dest = manualTargets[key] !== undefined ? manualTargets[key] : uniforms[key].value;
+        const manualVal = manualTargets[key] !== undefined ? manualTargets[key] : uniforms[key].value;
         
-        // 2. Override: Tag Value
-        if (targetConfig && targetConfig.values && targetConfig.values.hasOwnProperty(key)) {
-            dest = targetConfig.values[key];
-        }
-
-        // 3. Apply: Lerp
-        if (blend >= 1.0) {
-            uniforms[key].value = dest;
+        // If the tag controls this key, blend towards it
+        if (targetValues.hasOwnProperty(key)) {
+            const tagVal = targetValues[key];
+            
+            if (uniforms[key].value && uniforms[key].value.isColor) {
+                const targetColor = new THREE.Color(tagVal);
+                if (manualVal && manualVal.isColor) {
+                    uniforms[key].value.copy(manualVal).lerp(targetColor, weight);
+                }
+            } else {
+                // Interpolate based on the time-based weight
+                uniforms[key].value = lerp(manualVal, tagVal, weight);
+            }
         } else {
-            uniforms[key].value = lerp(uniforms[key].value, dest, blend);
+            // Tag doesn't care about this key, revert to manual
+            if (uniforms[key].value && uniforms[key].value.isColor) {
+                 if (manualVal && manualVal.isColor) uniforms[key].value.copy(manualVal);
+            } else {
+                 uniforms[key].value = manualVal; 
+            }
         }
-
+        
         // Sync Material
         if (material && material.uniforms[key]) {
             material.uniforms[key].value = uniforms[key].value;
@@ -889,7 +996,10 @@ const SHADER_LIB = {
         uniform float uHigh;
         uniform float uSpeed;
         uniform float uWarp;
-        uniform float uGlow;
+        uniform float uGlow; // Internal tunnel glow param? Or should we use uGlowStrength? 
+        // Let's keep uGlow for tunnel geometry logic if it differs, but mapping implies uGlowStrength is global.
+        // But here uGlow is a param. Let's use global uGlowStrength for the final mix.
+        
         uniform float uCamX;
         uniform float uCamY;
         uniform float uZoom;
@@ -899,18 +1009,20 @@ const SHADER_LIB = {
         uniform float uYaw;
         uniform float uRoll;
         
-        // Color Engine
-        uniform float uBaseHue;
-        uniform float uSaturation;
-        uniform float uColorShift;
+        // Color Engine (New)
+        uniform vec3 uBaseColor;
+        uniform vec3 uHighlight;
+        uniform vec3 uLowlight;
+        uniform vec3 uHighColor;
+        uniform vec3 uMidColor;
+        uniform vec3 uLowColor;
+        uniform float uGlowStrength;
+        uniform float uBloomStrength;
         
         varying vec2 vUv;
 
         // --- Helpers ---
-        vec3 hsl2rgb(vec3 c) {
-            vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
-            return c.z + c.y * (rgb - 0.5) * (1.0 - abs(2.0 * c.z - 1.0));
-        }
+        // (hsl2rgb removed as unused)
 
         mat3 getCamRot(vec3 rpy) {
             vec3 s = sin(rpy);
@@ -970,14 +1082,17 @@ const SHADER_LIB = {
                 float glow = 1.0 - float(i) / 80.0;
                 
                 // --- Color Engine ---
-                float hue = (uBaseHue / 360.0) + (uMid * uColorShift);
-                hue = fract(hue);
+                vec3 atmosphere = mix(uLowlight, uHighlight, glow);
+                vec3 audioReact = (uLowColor * uBass) + (uMidColor * uMid) + (uHighColor * uHigh);
                 
                 // Mix dynamic hue with a bit of the old palette for flavor
-                vec3 baseCol = hsl2rgb(vec3(hue, uSaturation, 0.5));
+                // vec3 baseCol = hsl2rgb(vec3(hue, uSaturation, 0.5));
+                
+                col = uBaseColor * atmosphere;
+                col += audioReact * uBloomStrength * glow;
                 
                 // Brightness/Bloom based on High
-                col = baseCol * glow * (uGlow + uBass * 3.0 + uHigh * 4.0);
+                col *= uGlowStrength * glow * (1.0 + uBass * 3.0 + uHigh * 4.0);
             }
             
             col *= exp(-0.05 * t);
@@ -1008,6 +1123,15 @@ const uniforms = {
     uMid: { value: 0 },
     uHigh: { value: 0 },
     // Color Palette Uniforms
+    uBaseColor: { value: new THREE.Color(0xffffff) },
+    uHighlight: { value: new THREE.Color(0x38bdf8) }, // Cyan-ish
+    uLowlight:  { value: new THREE.Color(0x1a0b2e) }, // Dark Purple
+    uHighColor: { value: new THREE.Color(0xff00ff) }, // Magenta
+    uMidColor:  { value: new THREE.Color(0x00ff00) }, // Green
+    uLowColor:  { value: new THREE.Color(0xff0000) }, // Red
+    uGlowStrength: { value: 1.5 },
+    uBloomStrength: { value: 0.8 },
+    // Legacy support (optional, can remove if unused by logic)
     uBaseHue: { value: 0.0 },
     uSaturation: { value: 1.0 },
     uColorShift: { value: 0.5 },
@@ -1022,6 +1146,25 @@ window.uniforms = uniforms; // Expose for Timeline
 const baseHueInput = document.getElementById('base-hue');
 const saturationInput = document.getElementById('saturation');
 const colorShiftInput = document.getElementById('color-shift');
+const manualColorToggle = document.getElementById('manual-color-toggle');
+
+function updateColorUIState() {
+    if (!manualColorToggle) return;
+    const enabled = manualColorToggle.checked;
+    baseHueInput.disabled = !enabled;
+    saturationInput.disabled = !enabled;
+    colorShiftInput.disabled = !enabled;
+    
+    const opacity = enabled ? '1' : '0.3';
+    baseHueInput.style.opacity = opacity;
+    saturationInput.style.opacity = opacity;
+    colorShiftInput.style.opacity = opacity;
+}
+
+if (manualColorToggle) {
+    manualColorToggle.addEventListener('change', updateColorUIState);
+    updateColorUIState(); // Init state
+}
 
 function updateColorParams() {
     const hue = parseFloat(baseHueInput.value);
@@ -1263,7 +1406,7 @@ function renderTagEditor() {
     addBtn.onclick = () => {
         const name = prompt('New Tag Name:');
         if (name && !window.TAG_LIBRARY[name]) {
-            window.TAG_LIBRARY[name] = { values: {}, transition: 'linear' };
+            window.TAG_LIBRARY[name] = { values: {}, transition: { duration: 1.0, curve: 'linear' } };
             currentTag = name;
             refreshSelect();
             renderParamsList();
@@ -1292,20 +1435,47 @@ function renderTagEditor() {
     const settings = document.createElement('div');
     settings.className = 'tag-editor-row';
     
+    // Curve Select
     const transSelect = document.createElement('select');
     transSelect.className = 'tag-editor-select';
-    ['linear', 'ease-in', 'cut'].forEach(t => {
+    Object.keys(EASING).forEach(t => {
         const opt = document.createElement('option');
         opt.value = t;
-        opt.textContent = t; // Capitalize?
+        opt.textContent = t;
         transSelect.appendChild(opt);
     });
     transSelect.onchange = (e) => {
         if (window.TAG_LIBRARY[currentTag]) {
-            window.TAG_LIBRARY[currentTag].transition = e.target.value;
+             if (typeof window.TAG_LIBRARY[currentTag].transition !== 'object') {
+                 window.TAG_LIBRARY[currentTag].transition = { duration: 1.0, curve: 'linear' };
+             }
+             window.TAG_LIBRARY[currentTag].transition.curve = e.target.value;
         }
     };
     settings.appendChild(transSelect);
+
+    // Duration Input
+    const durInput = document.createElement('input');
+    durInput.type = 'number';
+    durInput.step = '0.1';
+    durInput.style.width = '40px';
+    durInput.style.background = '#222';
+    durInput.style.border = '1px solid #444';
+    durInput.style.color = '#fff';
+    durInput.style.borderRadius = '4px';
+    durInput.style.padding = '4px';
+    durInput.style.fontSize = '11px';
+    durInput.title = 'Duration (s)';
+    
+    durInput.onchange = (e) => {
+        if (window.TAG_LIBRARY[currentTag]) {
+             if (typeof window.TAG_LIBRARY[currentTag].transition !== 'object') {
+                 window.TAG_LIBRARY[currentTag].transition = { duration: 1.0, curve: 'linear' };
+             }
+             window.TAG_LIBRARY[currentTag].transition.duration = parseFloat(e.target.value);
+        }
+    };
+    settings.appendChild(durInput);
 
     const previewLabel = document.createElement('label');
     previewLabel.style.fontSize = '11px';
@@ -1345,7 +1515,9 @@ function renderTagEditor() {
         if (!config.values) config.values = {};
         
         // Sync Transition Select
-        transSelect.value = config.transition || 'linear';
+        const t = config.transition || { duration: 1.0, curve: 'linear' };
+        transSelect.value = t.curve || 'linear';
+        if (typeof durInput !== 'undefined') durInput.value = t.duration !== undefined ? t.duration : 1.0;
 
         const allParams = getAllAvailableParams();
         
@@ -1557,6 +1729,16 @@ function createTagCard(tagKey) {
     return card;
 }
 
+function getSmartDefaults(duration) {
+    const d = duration || 4.0;
+    return {
+        attack: parseFloat((d * 0.1).toFixed(2)),
+        decay: parseFloat((d * 0.2).toFixed(2)),
+        sustain: 1.0,
+        release: parseFloat((d * 0.2).toFixed(2))
+    };
+}
+
 function expandTagCard(card, tagKey) {
     // 1. Collapse all others
     document.querySelectorAll('.tag-card.expanded').forEach(c => {
@@ -1606,24 +1788,133 @@ function renderTagEditorPanel(container, tagKey, card) {
     // --- Row 2: Transition & Capture ---
     const row2 = document.createElement('div');
     row2.className = 'editor-row';
+    row2.style.flexDirection = 'column';
+    row2.style.alignItems = 'stretch';
+
+    // ADSR Toggle
+    const adsrToggleRow = document.createElement('div');
+    adsrToggleRow.style.display = 'flex';
+    adsrToggleRow.style.gap = '8px';
+    adsrToggleRow.style.marginBottom = '8px';
+    adsrToggleRow.style.alignItems = 'center';
+    
+    const adsrCheck = document.createElement('input');
+    adsrCheck.type = 'checkbox';
+    adsrCheck.id = `adsr-toggle-${tagKey}`;
+    adsrCheck.checked = config.useADSR || false;
+    
+    const adsrLabel = document.createElement('label');
+    adsrLabel.htmlFor = `adsr-toggle-${tagKey}`;
+    adsrLabel.textContent = 'Use ADSR Envelope';
+    adsrLabel.style.fontSize = '11px';
+    adsrLabel.style.color = '#ccc';
+    adsrLabel.style.cursor = 'pointer';
+
+    adsrCheck.onchange = (e) => {
+        config.useADSR = e.target.checked;
+        const container = document.getElementById(`adsr-container-${tagKey}`);
+        const select = row2.querySelector('select');
+        if (container) container.style.display = config.useADSR ? 'block' : 'none';
+        if (select) select.style.display = config.useADSR ? 'none' : 'block';
+        
+        if (config.useADSR) {
+            if (!config.adsr) {
+                let duration = 4.0;
+                if (window.visualTimeline && window.visualTimeline.selectionStart !== null && window.visualTimeline.selectionEnd !== null) {
+                    duration = Math.abs(window.visualTimeline.selectionEnd - window.visualTimeline.selectionStart);
+                }
+                config.adsr = getSmartDefaults(duration);
+            }
+            setTimeout(() => {
+                if (typeof initADSREditor === 'function') {
+                    initADSREditor(`adsr-canvas-${tagKey}`, tagKey);
+                }
+            }, 10);
+        }
+    };
+    
+    adsrToggleRow.appendChild(adsrCheck);
+    adsrToggleRow.appendChild(adsrLabel);
+    row2.appendChild(adsrToggleRow);
+
+    // ADSR Container
+    const adsrContainer = document.createElement('div');
+    adsrContainer.id = `adsr-container-${tagKey}`;
+    adsrContainer.style.display = config.useADSR ? 'block' : 'none';
+    adsrContainer.style.marginBottom = '10px';
+    adsrContainer.innerHTML = `
+        <div style="position: relative;">
+            <canvas id="adsr-canvas-${tagKey}" width="300" height="100" style="background: rgba(0,0,0,0.3); border-radius: 4px; cursor: crosshair; display: block; width: 100%;"></canvas>
+            <button id="adsr-fit-${tagKey}" style="position: absolute; top: 5px; right: 5px; font-size: 9px; padding: 2px 4px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer; border-radius: 3px;">Fit to Selection</button>
+        </div>
+        <div class="adsr-inputs" style="display: flex; gap: 5px; margin-top: 5px; justify-content: space-between;">
+            <label style="color:#aaa; font-size:10px;">A: <input type="number" step="0.1" id="adsr-a-${tagKey}" value="${(config.adsr ? config.adsr.attack : 0.2)}" style="width: 35px; background:#222; border:1px solid #444; color:#fff; font-size:10px; border-radius:2px;"></label>
+            <label style="color:#aaa; font-size:10px;">D: <input type="number" step="0.1" id="adsr-d-${tagKey}" value="${(config.adsr ? config.adsr.decay : 0.5)}" style="width: 35px; background:#222; border:1px solid #444; color:#fff; font-size:10px; border-radius:2px;"></label>
+            <label style="color:#aaa; font-size:10px;">S: <input type="number" step="0.1" max="1.0" id="adsr-s-${tagKey}" value="${(config.adsr ? config.adsr.sustain : 1.0)}" style="width: 35px; background:#222; border:1px solid #444; color:#fff; font-size:10px; border-radius:2px;"></label>
+            <label style="color:#aaa; font-size:10px;">R: <input type="number" step="0.1" id="adsr-r-${tagKey}" value="${(config.adsr ? config.adsr.release : 1.0)}" style="width: 35px; background:#222; border:1px solid #444; color:#fff; font-size:10px; border-radius:2px;"></label>
+        </div>
+    `;
+    
+    // Bind Fit Button
+    setTimeout(() => {
+        const fitBtn = document.getElementById(`adsr-fit-${tagKey}`);
+        if (fitBtn) {
+            fitBtn.onclick = (e) => {
+                e.preventDefault();
+                let duration = 4.0;
+                if (window.visualTimeline && window.visualTimeline.selectionStart !== null && window.visualTimeline.selectionEnd !== null) {
+                    duration = Math.abs(window.visualTimeline.selectionEnd - window.visualTimeline.selectionStart);
+                }
+                config.adsr = getSmartDefaults(duration);
+                const setVal = (id, v) => { const el = document.getElementById(id); if(el) el.value = v; };
+                setVal(`adsr-a-${tagKey}`, config.adsr.attack);
+                setVal(`adsr-d-${tagKey}`, config.adsr.decay);
+                setVal(`adsr-s-${tagKey}`, config.adsr.sustain);
+                setVal(`adsr-r-${tagKey}`, config.adsr.release);
+                
+                const input = document.getElementById(`adsr-a-${tagKey}`);
+                if (input) input.dispatchEvent(new Event('change'));
+            };
+        }
+    }, 10);
+    
+    row2.appendChild(adsrContainer);
 
     const transSelect = document.createElement('select');
     transSelect.className = 'editor-input';
-    ['linear', 'ease-in', 'cut'].forEach(t => {
+    transSelect.style.display = config.useADSR ? 'none' : 'block';
+    
+    const easeOptions = typeof EASING !== 'undefined' ? Object.keys(EASING) : ['linear', 'ease-in', 'cut'];
+    easeOptions.forEach(t => {
         const opt = document.createElement('option');
         opt.value = t;
         opt.textContent = t;
-        if (config.transition === t) opt.selected = true;
+        const currentCurve = (config.transition && typeof config.transition === 'object') ? config.transition.curve : config.transition;
+        if (currentCurve === t) opt.selected = true;
         transSelect.appendChild(opt);
     });
+    transSelect.onchange = (e) => {
+        if (!config.transition || typeof config.transition !== 'object') config.transition = { duration: 1.0, curve: 'linear' };
+        config.transition.curve = e.target.value;
+    };
     row2.appendChild(transSelect);
 
     const captureBtn = document.createElement('button');
     captureBtn.className = 'editor-btn primary';
     captureBtn.textContent = 'CAPTURE STATE';
     captureBtn.title = 'Overwrite sliders with current scene';
+    captureBtn.style.marginTop = '8px';
+    captureBtn.style.width = '100%';
     row2.appendChild(captureBtn);
     panel.appendChild(row2);
+
+    if (config.useADSR) {
+        setTimeout(() => {
+            if (typeof initADSREditor === 'function') {
+                initADSREditor(`adsr-canvas-${tagKey}`, tagKey);
+            }
+        }, 10);
+    }
 
     // --- Row 3: Parameters List ---
     const paramList = document.createElement('div');
@@ -1632,7 +1923,8 @@ function renderTagEditorPanel(container, tagKey, card) {
     // Helper to render sliders
     const allParams = getAllAvailableParams();
     // Working copy of values
-    let currentValues = { ...config.values };
+    if (!config.values) config.values = {};
+    let currentValues = config.values;
 
     const renderSliders = () => {
         paramList.innerHTML = '';
@@ -1669,32 +1961,65 @@ function renderTagEditorPanel(container, tagKey, card) {
             label.style.textOverflow = 'ellipsis';
             row.appendChild(label);
 
-            // Slider
-            const slider = document.createElement('input');
-            slider.type = 'range';
-            slider.style.flexGrow = '1';
-            slider.style.height = '4px';
-            slider.min = p.min;
-            slider.max = p.max;
-            slider.step = (p.max - p.min) / 100;
-            slider.disabled = !isIncluded;
-            
-            if (isIncluded) {
-                slider.value = currentValues[p.name];
-            } else {
-                slider.value = uniforms[p.name] ? uniforms[p.name].value : p.value;
-                slider.style.opacity = '0.3';
-            }
-
-            slider.oninput = (e) => {
-                const val = parseFloat(e.target.value);
+            // Input Control
+            if (p.inputType === 'color') {
+                const colorInput = document.createElement('input');
+                colorInput.type = 'color';
+                colorInput.style.flexGrow = '1';
+                colorInput.style.height = '20px';
+                colorInput.style.background = 'transparent';
+                colorInput.style.border = 'none';
+                colorInput.style.cursor = 'pointer';
+                colorInput.disabled = !isIncluded;
+                
+                let val = '#ffffff';
                 if (isIncluded) {
-                    currentValues[p.name] = val;
-                    // Live Preview
-                    if (uniforms[p.name]) uniforms[p.name].value = val;
+                    val = currentValues[p.name] || '#ffffff';
+                } else if (uniforms[p.name] && uniforms[p.name].value && uniforms[p.name].value.getHexString) {
+                    val = '#' + uniforms[p.name].value.getHexString();
                 }
-            };
-            row.appendChild(slider);
+                colorInput.value = val;
+                
+                if (!isIncluded) colorInput.style.opacity = '0.3';
+                else colorInput.style.opacity = '1';
+
+                colorInput.oninput = (e) => {
+                    if (isIncluded) {
+                        currentValues[p.name] = e.target.value;
+                        if (uniforms[p.name] && uniforms[p.name].value && uniforms[p.name].value.set) {
+                            uniforms[p.name].value.set(e.target.value);
+                        }
+                    }
+                };
+                row.appendChild(colorInput);
+            } else {
+                // Slider
+                const slider = document.createElement('input');
+                slider.type = 'range';
+                slider.style.flexGrow = '1';
+                slider.style.height = '4px';
+                slider.min = p.min !== undefined ? p.min : 0;
+                slider.max = p.max !== undefined ? p.max : 1;
+                slider.step = (slider.max - slider.min) / 100;
+                slider.disabled = !isIncluded;
+                
+                if (isIncluded) {
+                    slider.value = currentValues[p.name];
+                } else {
+                    slider.value = uniforms[p.name] ? uniforms[p.name].value : (p.value || 0);
+                    slider.style.opacity = '0.3';
+                }
+
+                slider.oninput = (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (isIncluded) {
+                        currentValues[p.name] = val;
+                        // Live Preview
+                        if (uniforms[p.name]) uniforms[p.name].value = val;
+                    }
+                };
+                row.appendChild(slider);
+            }
             paramList.appendChild(row);
         });
     };
@@ -1730,11 +2055,35 @@ function renderTagEditorPanel(container, tagKey, card) {
     saveBtn.className = 'editor-btn primary';
     saveBtn.textContent = 'Save Changes';
     saveBtn.onclick = () => {
+        const toggleEl = document.getElementById(`adsr-toggle-${tagKey}`);
+        const useADSR = toggleEl ? toggleEl.checked : false;
+        
+        const getVal = (id) => {
+            const el = document.getElementById(id);
+            return el ? (parseFloat(el.value) || 0) : 0;
+        };
+
+        const adsr = {
+            attack: getVal(`adsr-a-${tagKey}`),
+            decay: getVal(`adsr-d-${tagKey}`),
+            sustain: Math.max(0, Math.min(1.0, getVal(`adsr-s-${tagKey}`))),
+            release: getVal(`adsr-r-${tagKey}`)
+        };
+
+        let transObj = { duration: 1.0, curve: transSelect.value };
+        const oldTag = window.TAG_LIBRARY[tagKey];
+        if (oldTag && oldTag.transition && typeof oldTag.transition === 'object') {
+             transObj.duration = oldTag.transition.duration || 1.0;
+             transObj.fadeOutDuration = oldTag.transition.fadeOutDuration || 0;
+        }
+
         handleSaveTag(tagKey, {
             newName: nameInput.value,
             color: colorInput.value,
-            transition: transSelect.value,
-            values: currentValues
+            transition: transObj,
+            values: currentValues,
+            useADSR: useADSR,
+            adsr: adsr
         });
     };
     row4.appendChild(saveBtn);
@@ -1744,7 +2093,7 @@ function renderTagEditorPanel(container, tagKey, card) {
 }
 
 function handleSaveTag(originalKey, data) {
-    const { newName, color, transition, values } = data;
+    const { newName, color, transition, values, useADSR, adsr } = data;
     
     // Validation
     if (!newName.trim()) return alert('Name required');
@@ -1765,11 +2114,13 @@ function handleSaveTag(originalKey, data) {
     window.TAG_LIBRARY[newName] = {
         color: color,
         transition: transition,
-        values: values
+        values: values,
+        useADSR: useADSR,
+        adsr: adsr
     };
 
     // Refresh UI
-    renderTagManager();
+    if (typeof renderTagManager === 'function') renderTagManager();
     if (window.visualTimeline) window.visualTimeline.drawTracks();
 }
 
@@ -2016,10 +2367,44 @@ function animate(time) {
     uniforms.uHigh.value = uHighValue;
     uniforms.iTime.value = time * 0.001;
     
-    // Color Palette
-    manualTargets['uBaseHue'] = parseFloat(baseHueInput.value);
-    manualTargets['uSaturation'] = parseFloat(saturationInput.value) / 100.0;
-    manualTargets['uColorShift'] = parseFloat(colorShiftInput.value);
+    // Color Palette (Manual Inputs -> Advanced Uniforms)
+    let shiftVal = 0.5;
+    let satVal = 1.0;
+    let hueVal = 0.0;
+
+    if (manualColorToggle && !manualColorToggle.checked) {
+        // Disabled: Use Neutral Defaults
+        manualTargets['uBaseColor'] = new THREE.Color(0xffffff);
+        shiftVal = 0.5;
+    } else {
+        // Enabled: Use Inputs
+        hueVal = parseFloat(baseHueInput.value) / 360.0;
+        satVal = parseFloat(saturationInput.value) / 100.0;
+        shiftVal = parseFloat(colorShiftInput.value);
+        manualTargets['uBaseColor'] = new THREE.Color().setHSL(hueVal, satVal, 0.5);
+    }
+    
+    // Other Advanced Defaults (Fixed for now, could add UI later)
+    manualTargets['uHighlight'] = new THREE.Color(0x38bdf8);
+    manualTargets['uLowlight']  = new THREE.Color(0x1a0b2e);
+    manualTargets['uHighColor'] = new THREE.Color(0xff00ff);
+    manualTargets['uMidColor']  = new THREE.Color(0x00ff00);
+    manualTargets['uLowColor']  = new THREE.Color(0xff0000);
+    
+    manualTargets['uGlowStrength'] = 1.5;
+    manualTargets['uBloomStrength'] = 0.8;
+    
+    // Legacy support
+    manualTargets['uBaseHue'] = parseFloat(baseHueInput.value); // Keep reading input for legacy just in case? Or use hueVal?
+    // Actually better to use calculated values so legacy logic (if any) respects toggle too.
+    if (manualColorToggle && !manualColorToggle.checked) {
+        manualTargets['uBaseHue'] = 0;
+        manualTargets['uSaturation'] = 0;
+    } else {
+        manualTargets['uBaseHue'] = hueVal * 360.0;
+        manualTargets['uSaturation'] = satVal;
+    }
+    manualTargets['uColorShift'] = shiftVal;
 
     // Visual Params
     const currentStyle = visualStyleSelect.value;
@@ -2081,3 +2466,156 @@ function animate(time) {
 }
 
 requestAnimationFrame(animate);
+function initADSREditor(canvasId, tagKey) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const tag = window.TAG_LIBRARY[tagKey];
+    if (!tag.adsr) {
+        tag.adsr = { attack: 0.2, decay: 0.5, sustain: 1.0, release: 1.0 };
+    }
+    
+    const inputs = {
+        a: document.getElementById(`adsr-a-${tagKey}`),
+        d: document.getElementById(`adsr-d-${tagKey}`),
+        s: document.getElementById(`adsr-s-${tagKey}`),
+        r: document.getElementById(`adsr-r-${tagKey}`)
+    };
+
+    let isDragging = null;
+    const padding = 10;
+    const w = canvas.width;
+    const h = canvas.height;
+    const totalTime = 10.0; // Fixed 10s scale
+
+    const timeToX = (t) => padding + (t / totalTime) * (w - 2 * padding);
+    const valToY = (v) => h - padding - (v * (h - 2 * padding));
+    const xToTime = (x) => ((x - padding) / (w - 2 * padding)) * totalTime;
+    const yToVal = (y) => 1.0 - ((y - padding) / (h - 2 * padding));
+
+    const draw = () => {
+        if (!canvas.parentNode) return; // Stop if removed
+        ctx.clearRect(0, 0, w, h);
+        
+        const { attack, decay, sustain, release } = tag.adsr;
+        
+        const releaseStartT = totalTime - release;
+        
+        // Points
+        const p1 = { x: timeToX(0), y: valToY(0) }; // Start
+        const p2 = { x: timeToX(attack), y: valToY(1.0) }; // Peak
+        const p3 = { x: timeToX(attack + decay), y: valToY(sustain) }; // Sustain Start
+        const p4 = { x: timeToX(releaseStartT), y: valToY(sustain) }; // Release Start
+        const p5 = { x: timeToX(totalTime), y: valToY(0) }; // End
+
+        // Fill
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.lineTo(p3.x, p3.y);
+        ctx.lineTo(p4.x, p4.y);
+        ctx.lineTo(p5.x, p5.y);
+        ctx.fillStyle = tag.color || '#ff0000';
+        ctx.globalAlpha = 0.3;
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+        
+        // Line
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Handles
+        const drawHandle = (p, label) => {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff';
+            ctx.fill();
+            if (label) {
+                ctx.fillStyle = '#ccc';
+                ctx.font = '10px sans-serif';
+                ctx.fillText(label, p.x - 5, p.y - 10);
+            }
+        };
+
+        drawHandle(p2, 'A');
+        drawHandle(p3, 'D');
+        drawHandle(p4, 'R');
+    };
+
+    const updateInputs = () => {
+        if (inputs.a) inputs.a.value = tag.adsr.attack.toFixed(2);
+        if (inputs.d) inputs.d.value = tag.adsr.decay.toFixed(2);
+        if (inputs.s) inputs.s.value = tag.adsr.sustain.toFixed(2);
+        if (inputs.r) inputs.r.value = tag.adsr.release.toFixed(2);
+    };
+
+    canvas.onmousedown = (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        
+        const { attack, decay, sustain, release } = tag.adsr;
+        const p2 = { x: timeToX(attack), y: valToY(1.0) };
+        const p3 = { x: timeToX(attack + decay), y: valToY(sustain) };
+        const p4 = { x: timeToX(totalTime - release), y: valToY(sustain) };
+        
+        if (Math.hypot(x - p2.x, y - p2.y) < 10) isDragging = 'attack';
+        else if (Math.hypot(x - p3.x, y - p3.y) < 10) isDragging = 'decay';
+        else if (Math.hypot(x - p4.x, y - p4.y) < 10) isDragging = 'release';
+    };
+
+    const moveHandler = (e) => {
+        if (!isDragging) return;
+        if (!document.body.contains(canvas)) {
+            window.removeEventListener('mousemove', moveHandler);
+            return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const t = Math.max(0, Math.min(totalTime, xToTime(x)));
+        const v = Math.max(0, Math.min(1.0, yToVal(y)));
+
+        if (isDragging === 'attack') {
+            tag.adsr.attack = Math.max(0.1, t); // Min 0.1s
+        } else if (isDragging === 'decay') {
+            const d = t - tag.adsr.attack;
+            if (d > 0) tag.adsr.decay = d;
+            tag.adsr.sustain = v;
+        } else if (isDragging === 'release') {
+            const r = totalTime - t;
+            if (r > 0) tag.adsr.release = r;
+            tag.adsr.sustain = v;
+        }
+        updateInputs();
+        draw();
+    };
+
+    window.addEventListener('mousemove', moveHandler);
+    window.addEventListener('mouseup', () => { isDragging = null; });
+
+    // Input Listeners
+    if (inputs.a) inputs.a.onchange = (e) => { 
+        const v = parseFloat(e.target.value);
+        if (!isNaN(v)) tag.adsr.attack = Math.max(0, v); 
+        updateInputs(); draw(); 
+    };
+    if (inputs.d) inputs.d.onchange = (e) => { 
+        const v = parseFloat(e.target.value);
+        if (!isNaN(v)) tag.adsr.decay = Math.max(0, v); 
+        updateInputs(); draw(); 
+    };
+    if (inputs.s) inputs.s.onchange = (e) => { 
+        const v = parseFloat(e.target.value);
+        if (!isNaN(v)) tag.adsr.sustain = Math.max(0, Math.min(1.0, v)); 
+        updateInputs(); draw(); 
+    };
+    if (inputs.r) inputs.r.onchange = (e) => { 
+        const v = parseFloat(e.target.value);
+        if (!isNaN(v)) tag.adsr.release = Math.max(0, v); 
+        updateInputs(); draw(); 
+    };
+
+    draw();
+}
