@@ -2619,3 +2619,157 @@ function initADSREditor(canvasId, tagKey) {
 
     draw();
 }
+
+
+// --- 4. Image Overlay System ---
+
+const overlayLayer = document.getElementById('overlay-layer');
+const imageUploadInput = document.getElementById('image-upload');
+const activeOverlaysList = document.getElementById('active-overlays');
+const overlayPropsPanel = document.getElementById('overlay-properties');
+const noOverlayMsg = document.getElementById('no-overlay-msg');
+const deleteOverlayBtn = document.getElementById('delete-overlay-btn');
+
+// Inputs
+const overlayX = document.getElementById('overlay-x');
+const overlayY = document.getElementById('overlay-y');
+const overlayScale = document.getElementById('overlay-scale');
+const overlayRot = document.getElementById('overlay-rot');
+const overlayOpacity = document.getElementById('overlay-opacity');
+
+// Values
+const overlayXVal = document.getElementById('overlay-x-val');
+const overlayYVal = document.getElementById('overlay-y-val');
+const overlayScaleVal = document.getElementById('overlay-scale-val');
+const overlayRotVal = document.getElementById('overlay-rot-val');
+const overlayOpacityVal = document.getElementById('overlay-opacity-val');
+
+let activeOverlays = []; // { id, element, props }
+let selectedOverlayId = null;
+
+if (imageUploadInput) {
+    imageUploadInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append('imageFile', file);
+
+        try {
+            const response = await fetch('/upload-image', { method: 'POST', body: formData });
+            const data = await response.json();
+            addOverlay(data.filePath, file.name);
+        } catch (err) {
+            console.error('Image upload failed:', err);
+        }
+        e.target.value = ''; // Reset
+    });
+}
+
+function addOverlay(src, name) {
+    const id = 'overlay-' + Date.now();
+    const img = document.createElement('img');
+    img.src = src;
+    img.style.position = 'absolute';
+    img.style.transformOrigin = 'center center';
+    img.style.pointerEvents = 'none'; // Keep it visual
+
+    // Default Props
+    const props = {
+        x: 50, y: 50, scale: 1.0, rot: 0, opacity: 1.0
+    };
+
+    updateOverlayStyle(img, props);
+    if (overlayLayer) overlayLayer.appendChild(img);
+
+    const overlay = { id, element: img, name, props };
+    activeOverlays.push(overlay);
+    
+    renderOverlayList();
+    selectOverlay(id);
+}
+
+function updateOverlayStyle(img, props) {
+    img.style.left = props.x + '%';
+    img.style.top = props.y + '%';
+    img.style.transform = `translate(-50%, -50%) rotate(${props.rot}deg) scale(${props.scale})`;
+    img.style.opacity = props.opacity;
+}
+
+function renderOverlayList() {
+    if (!activeOverlaysList) return;
+    activeOverlaysList.innerHTML = '';
+    activeOverlays.forEach(ov => {
+        const li = document.createElement('li');
+        li.textContent = ov.name;
+        li.style.padding = '4px 8px';
+        li.style.cursor = 'pointer';
+        li.style.fontSize = '11px';
+        li.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+        if (ov.id === selectedOverlayId) {
+            li.style.background = 'rgba(56, 189, 248, 0.3)';
+            li.style.color = '#fff';
+        } else {
+            li.style.color = '#aaa';
+        }
+        li.onclick = () => selectOverlay(ov.id);
+        activeOverlaysList.appendChild(li);
+    });
+}
+
+function selectOverlay(id) {
+    selectedOverlayId = id;
+    const ov = activeOverlays.find(o => o.id === id);
+    
+    if (ov) {
+        if (overlayPropsPanel) overlayPropsPanel.style.display = 'block';
+        if (noOverlayMsg) noOverlayMsg.style.display = 'none';
+        
+        // Populate inputs
+        if (overlayX) { overlayX.value = ov.props.x; overlayXVal.textContent = ov.props.x; }
+        if (overlayY) { overlayY.value = ov.props.y; overlayYVal.textContent = ov.props.y; }
+        if (overlayScale) { overlayScale.value = ov.props.scale; overlayScaleVal.textContent = ov.props.scale; }
+        if (overlayRot) { overlayRot.value = ov.props.rot; overlayRotVal.textContent = ov.props.rot; }
+        if (overlayOpacity) { overlayOpacity.value = ov.props.opacity; overlayOpacityVal.textContent = ov.props.opacity; }
+    } else {
+        if (overlayPropsPanel) overlayPropsPanel.style.display = 'none';
+        if (noOverlayMsg) noOverlayMsg.style.display = 'block';
+    }
+    renderOverlayList();
+}
+
+// Bind Inputs
+function bindInput(input, valDisplay, propKey) {
+    if (!input) return;
+    input.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value);
+        if (valDisplay) valDisplay.textContent = val;
+        
+        const ov = activeOverlays.find(o => o.id === selectedOverlayId);
+        if (ov) {
+            ov.props[propKey] = val;
+            updateOverlayStyle(ov.element, ov.props);
+        }
+    });
+}
+
+bindInput(overlayX, overlayXVal, 'x');
+bindInput(overlayY, overlayYVal, 'y');
+bindInput(overlayScale, overlayScaleVal, 'scale');
+bindInput(overlayRot, overlayRotVal, 'rot');
+bindInput(overlayOpacity, overlayOpacityVal, 'opacity');
+
+if (deleteOverlayBtn) {
+    deleteOverlayBtn.addEventListener('click', () => {
+        if (!selectedOverlayId) return;
+        const idx = activeOverlays.findIndex(o => o.id === selectedOverlayId);
+        if (idx !== -1) {
+            const ov = activeOverlays[idx];
+            ov.element.remove();
+            activeOverlays.splice(idx, 1);
+            selectedOverlayId = null;
+            renderOverlayList();
+            selectOverlay(null);
+        }
+    });
+}

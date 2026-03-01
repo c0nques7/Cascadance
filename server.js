@@ -30,6 +30,14 @@ app.post('/upload', upload.single('audioFile'), (req, res) => {
     res.json({ filePath: `/uploads/${req.file.filename}` });
 });
 
+app.post('/upload-image', upload.single('imageFile'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).send('No file uploaded.');
+    }
+    console.log(`Image uploaded: ${req.file.filename}`);
+    res.json({ filePath: `/uploads/${req.file.filename}` });
+});
+
 app.listen(port, () => {
     console.log(`Cascadance server running at http://localhost:${port}`);
 });
